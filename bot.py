@@ -1,3 +1,4 @@
+import json
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -146,7 +147,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # 替换为你的 Bot Token
-    BOT_TOKEN = '7190197001:AAGsjX6nWwkJU-8cDVYwBOYFWMjLlk-V2aI'
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+    BOT_TOKEN = config['telegram_token']
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
