@@ -2,3 +2,4 @@ credentials.json
 token.pickle
 config.json
 *.jpg
+logs_cache.json

@@ -22,9 +22,41 @@ from telegram.ext import CallbackQueryHandler, Application
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
+# 处理Logs邮件.
+import base64
+import html
+import re
+import asyncio
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+from telegram.error import BadRequest
+
+# 日志缓存文件路径
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGS_CACHE_PATH = os.path.join(BASE_DIR, "logs_cache.json")
+
+LOGS_PER_PAGE = 8
+
+ERROR_TEXT = {
+    100: "沒有找到附件",
+    101: "附件內容讀取失敗",
+    102: "附件可能是純圖片類型",
+    200: "敏感詞",
+    300: "AI 處理失敗，通用 AI pipeline 失敗",
+    301: "Gemini 處理達到限額",
+    400: "SEO 信息提取失敗",
+    500: "插入 WP 草稿箱失敗",
+    501: "插入 WP 草稿箱部分成功：文字 OK，圖片失敗",
+    900: "未知的異常，兜底",
+}
+
 
 # 邮件目标
-SCOPES = ['https://www.googleapis.com/auth/gmail.send']
+SCOPES = [
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/gmail.readonly",
+]
+
 TARGET_EMAIL = 'bp.filtermailbox@gmail.com'
 
 # 可选设置项
@@ -274,12 +306,18 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     ui_msg = f"附件列表：\n{attach_list}\n\n---\n\n{settings_text}"
 
-    # 主菜单按钮：确认 | 删除 | 设置
-    buttons = [[
+    # 构建按钮 （确认，删除，设置，Logs）
+    buttons = [
+    [
         InlineKeyboardButton("确认", callback_data=f"confirm_send|{session_key}"),
         InlineKeyboardButton("删除", callback_data=f"menu_delete_mode|{session_key}"),
-        InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}")
-    ]]
+        InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}"),
+    ],
+    [
+        InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}")
+    ]
+    ]
+
     reply_markup = InlineKeyboardMarkup(buttons)
 
     if update.callback_query:
@@ -461,6 +499,382 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
     del user_sessions[session_key]
 
+# --- 以下为 Logs 邮件处理相关辅助函数 ---
+def _now_hk() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Hong_Kong"))
+
+def ensure_logs_cache():
+    if os.path.exists(LOGS_CACHE_PATH):
+        return
+    with open(LOGS_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump([], f, ensure_ascii=False, indent=2)
+
+
+def read_logs_cache() -> List[Dict[str, Any]]:
+    ensure_logs_cache()
+    try:
+        with open(LOGS_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _filter_logs(logs: List[Dict[str, Any]], days: int, mode: str) -> List[Dict[str, Any]]:
+    cutoff = _now_hk() - timedelta(days=days)
+    out = []
+    for x in logs:
+        try:
+            ts = datetime.fromisoformat(x.get("ts", ""))
+        except Exception:
+            continue
+        if ts < cutoff:
+            continue
+        st = (x.get("status") or "").upper()
+        if mode == "SUCCESS" and st != "SUCCESS":
+            continue
+        if mode == "ERROR" and st != "ERROR":
+            continue
+        out.append(x)
+    out.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    return out
+
+def _get_logs_view(context: ContextTypes.DEFAULT_TYPE, session_key: str) -> Dict[str, Any]:
+    key = f"logs_view_{session_key}"
+    if key not in context.user_data:
+        context.user_data[key] = {"days": 1, "mode": "ALL", "page": 0}
+    return context.user_data[key]
+
+# --- Logs 菜单及交互逻辑 ---
+async def show_logs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, session_key: str):
+    query = update.callback_query
+    view = _get_logs_view(context, session_key)
+    days, mode, page = view["days"], view["mode"], view["page"]
+
+    logs = read_logs_cache()
+    filtered = _filter_logs(logs, days=days, mode=mode)
+
+    succ = sum(1 for x in filtered if (x.get("status") or "").upper() == "SUCCESS")
+    fail = sum(1 for x in filtered if (x.get("status") or "").upper() == "ERROR")
+
+    total = len(filtered)
+    start = page * LOGS_PER_PAGE
+    end = start + LOGS_PER_PAGE
+    items = filtered[start:end]
+
+    text = (
+        f"🧾 Logs（最近{days}天 / {mode}）\n"
+        f"成功: {succ}  失败: {fail}  总计: {total}\n"
+        f"页: {page + 1} / {max(1, (total + LOGS_PER_PAGE - 1)//LOGS_PER_PAGE)}"
+    )
+
+    keyboard = []
+    for x in items:
+        st = (x.get("status") or "").upper()
+        # 按钮文本：✅ or ❌ + 截断标题
+        prefix = "✅" if st == "SUCCESS" else "❌"
+        short_title = (x.get("title") or "")[:8]
+        btn_text = f"{prefix} {short_title}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"log_detail|{session_key}|{x.get('id')}")])
+
+    # 筛选：天数
+    keyboard.append([
+        InlineKeyboardButton("1天", callback_data=f"logs_days|{session_key}|1"),
+        InlineKeyboardButton("3天", callback_data=f"logs_days|{session_key}|3"),
+        InlineKeyboardButton("7天", callback_data=f"logs_days|{session_key}|7"),
+    ])
+    # 筛选：状态
+    keyboard.append([
+        InlineKeyboardButton("全部", callback_data=f"logs_mode|{session_key}|ALL"),
+        InlineKeyboardButton("成功", callback_data=f"logs_mode|{session_key}|SUCCESS"),
+        InlineKeyboardButton("失败", callback_data=f"logs_mode|{session_key}|ERROR"),
+    ])
+    # 翻页 + 刷新 + 返回
+    keyboard.append([
+        InlineKeyboardButton("⬅️ 上一页", callback_data=f"logs_page|{session_key}|-1"),
+        InlineKeyboardButton("➡️ 下一页", callback_data=f"logs_page|{session_key}|1"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("🔄 刷新", callback_data=f"logs_refresh|{session_key}"),
+        InlineKeyboardButton("⬅️ 返回", callback_data=f"logs_back|{session_key}"),
+    ])
+
+    try:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        raise
+
+
+async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+    _get_logs_view(context, session_key)  # init
+    await show_logs_menu(update, context, session_key)
+
+async def on_logs_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, session_key, days = query.data.split("|")
+    view = _get_logs_view(context, session_key)
+    view["days"] = int(days)
+    view["page"] = 0
+    await show_logs_menu(update, context, session_key)
+
+async def on_logs_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, session_key, mode = query.data.split("|")
+    view = _get_logs_view(context, session_key)
+    view["mode"] = mode
+    view["page"] = 0
+    await show_logs_menu(update, context, session_key)
+
+async def on_logs_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, session_key, delta = query.data.split("|")
+    view = _get_logs_view(context, session_key)
+    logs = _filter_logs(read_logs_cache(), days=view["days"], mode=view["mode"])
+    max_page = max(0, (len(logs) - 1) // LOGS_PER_PAGE)
+    view["page"] = min(max(0, view["page"] + int(delta)), max_page)
+    await show_logs_menu(update, context, session_key)
+
+async def on_logs_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    try:
+        await query.answer("刷新中...", cache_time=0)
+    except BadRequest:
+        # 回调过期就忽略，不要让整个刷新流程炸掉
+        pass
+
+    session_key = query.data.split('|')[1]
+    days = _get_logs_view(context, session_key)["days"]
+
+    try:
+        await asyncio.to_thread(fetch_logs_from_gmail, days=days, max_results=200)
+    except Exception as e:
+        try:
+            await query.answer(f"拉取失败: {e}", show_alert=True)
+        except BadRequest:
+            pass
+
+    await show_logs_menu(update, context, session_key)
+
+async def on_log_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, session_key, log_id = query.data.split("|")
+
+    logs = read_logs_cache()
+    x = next((r for r in logs if str(r.get("id")) == str(log_id)), None)
+    if not x:
+        await query.edit_message_text("⚠️ 记录不存在或已过期。")
+        return
+
+    st = (x.get("status") or "").upper()
+    code = x.get("error_code")
+    err = ERROR_TEXT.get(int(code), "") if code is not None else ""
+    ts = x.get("ts", "")
+    subject = x.get("subject", "")
+    title = x.get("title", "")
+
+    text = (
+        f"🧾 Log 详情\n"
+        f"时间: {ts}\n"
+        f"状态: {st}\n"
+        f"错误码: {code or '-'} {f'({err})' if err else ''}\n"
+        f"标题: {title}\n\n"
+        f"Subject:\n{subject}"
+    )
+    keyboard = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"menu_logs|{session_key}")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def on_logs_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+    await handle_mention(update, context)  # 回到你的主菜单渲染
+
+
+# --- Logs 邮件处理相关辅助函数实现 ---
+def _safe_header(headers: list, name: str) -> str:
+    for h in headers or []:
+        if (h.get("name") or "").lower() == name.lower():
+            return h.get("value") or ""
+    return ""
+
+def _parse_status_error_from_subject(subject: str):
+    s = (subject or "").upper()
+    if "SUCCESS" in s:
+        return "SUCCESS", None
+
+    m = re.search(r"ERROR\s*(\d+)", s)
+    if m:
+        return "ERROR", int(m.group(1))
+
+    if "ERROR" in s:
+        return "ERROR", None
+
+    return "UNKNOWN", None
+
+
+def _extract_fields_from_text(text: str):
+    gmail_id = None
+    original_subject = None
+
+    m1 = re.search(r"Gmail ID\s*:\s*([0-9a-fA-F]+)", text or "")
+    if m1:
+        gmail_id = m1.group(1).strip()
+
+    m2 = re.search(r"Original Subject\s*:\s*([^\r\n]+)", text or "")
+    if m2:
+        original_subject = m2.group(1).strip()
+
+    return gmail_id, original_subject
+
+
+def upsert_logs_cache(items: list):
+    ensure_logs_cache()
+    existing = read_logs_cache()
+    by_key = {}
+    for x in existing:
+        k = x.get("gmail_id") or x.get("id")
+        if k:
+            by_key[k] = x
+    for it in items:
+        k = it.get("gmail_id") or it.get("id")
+        if k:
+            by_key[k] = it
+
+    merged = list(by_key.values())
+    merged.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    with open(LOGS_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+def _b64url_decode(data: str) -> str:
+    if not data:
+        return ""
+    # Gmail 是 base64url
+    raw = base64.urlsafe_b64decode(data + "===")
+    return raw.decode("utf-8", errors="ignore")
+
+def _extract_text_from_payload(payload: dict) -> str:
+    if not payload:
+        return ""
+    mime = (payload.get("mimeType") or "").lower()
+    body = (payload.get("body") or {})
+    data = body.get("data")
+
+    # 直接是 text/plain
+    if mime == "text/plain" and data:
+        return _b64url_decode(data)
+
+    # multipart 递归找 text/plain
+    for part in payload.get("parts") or []:
+        t = _extract_text_from_payload(part)
+        if t:
+            return t
+
+    # 兜底：如果只有 text/html，就解出来（只用于搜字段，不做完整渲染）
+    if mime == "text/html" and data:
+        return html.unescape(_b64url_decode(data))
+
+    return ""
+
+def fetch_logs_from_gmail(days: int = 1, max_results: int = 200) -> int:
+    service = get_gmail_service()
+
+    # 只抓 Subject 含 SUCCESS/ERROR 的邮件，避免 (SUCCESS OR ERROR) 误命中正文
+    q = f'(subject:SUCCESS OR subject:ERROR) newer_than:{days}d'
+
+    # 初步测试输出
+    print("q =", q)
+    resp = service.users().messages().list(userId="me", q=q, maxResults=100).execute()
+    print("resultSizeEstimate =", resp.get("resultSizeEstimate"))
+    print("messages len =", len(resp.get("messages", []) or []))
+
+
+    # 1) 先分页 list 拿到 message id 列表
+    msgs = []
+    page_token = None
+    while True:
+        remaining = max_results - len(msgs)
+        if remaining <= 0:
+            break
+
+        resp = service.users().messages().list(
+            userId="me",
+            q=q,
+            maxResults=min(100, remaining),
+            pageToken=page_token,
+            # ⚠️ 不要写 labelIds=["INBOX"]，否则归档/不在收件箱的 logs 会抓不到
+        ).execute()
+
+        batch = resp.get("messages", []) or []
+        msgs.extend(batch)
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    # 2) 对每封邮件 get(full) 解析字段
+    out = []
+    for m in msgs:
+        mid = m.get("id")
+        if not mid:
+            continue
+
+        detail = service.users().messages().get(
+            userId="me",
+            id=mid,
+            format="full",
+        ).execute()
+
+        payload = (detail.get("payload") or {})
+        headers = payload.get("headers") or []
+        subject = _safe_header(headers, "Subject")
+
+        status, error_code = _parse_status_error_from_subject(subject)
+        if status not in ("SUCCESS", "ERROR"):
+            continue
+
+        snippet = detail.get("snippet") or ""
+        body_text = _extract_text_from_payload(payload) or ""
+
+        gmail_id, original_subject = _extract_fields_from_text(body_text)
+        if not original_subject:
+            gmail_id2, original_subject2 = _extract_fields_from_text(snippet)
+            gmail_id = gmail_id or gmail_id2
+            original_subject = original_subject2
+
+        internal_ms = int(detail.get("internalDate", "0") or "0")
+        ts = datetime.fromtimestamp(
+            internal_ms / 1000,
+            ZoneInfo("Asia/Hong_Kong")
+        ).isoformat(timespec="seconds")
+
+        title = original_subject or subject
+        short_title = (title or "")[:8]
+
+        out.append({
+            "id": mid,
+            "ts": ts,
+            "status": status,
+            "error_code": error_code,
+            "title": title,
+            "short_title": short_title,
+            "subject": subject,
+            "gmail_id": gmail_id,
+            "original_subject": original_subject,
+        })
+
+    upsert_logs_cache(out)
+    return len(out)
+
+
 
 def main():
     # 配置文件含 telegram_token
@@ -498,6 +912,16 @@ def main():
     app.add_handler(CallbackQueryHandler(on_settings_cancel, pattern=r"^settings_cancel\|"))
     app.add_handler(CallbackQueryHandler(on_settings_cancel_confirm, pattern=r"^settings_cancel_confirm\|"))
     app.add_handler(CallbackQueryHandler(on_menu_settings_back, pattern=r"^menu_settings_back\|"))
+
+    # 7. Logs 菜单及交互逻辑
+    app.add_handler(CallbackQueryHandler(on_menu_logs, pattern=r"^menu_logs\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_days, pattern=r"^logs_days\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_mode, pattern=r"^logs_mode\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_page, pattern=r"^logs_page\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_refresh, pattern=r"^logs_refresh\|"))
+    app.add_handler(CallbackQueryHandler(on_log_detail, pattern=r"^log_detail\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_back, pattern=r"^logs_back\|"))
+
 
     print("Bot 已启动...")
     app.run_polling()
