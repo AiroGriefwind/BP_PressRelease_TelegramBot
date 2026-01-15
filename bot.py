@@ -30,6 +30,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from telegram.error import BadRequest
+from telegram.ext import Job
 
 # 日志缓存文件路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +76,171 @@ DEFAULT_SETTINGS = {
 
 # 保存每个用户添加的文件列表（支持群聊私聊）
 user_sessions = {}
+
+# 会话超时（无操作）自动结束：10分钟
+SESSION_TIMEOUT_SECONDS = 10 * 60
+session_timeout_jobs: Dict[str, Job] = {}
+
+
+def _safe_del(d: dict, k: str):
+    try:
+        if d is not None and k in d:
+            del d[k]
+    except Exception:
+        pass
+
+
+def _cleanup_session_userdata(application: Application, user_id: int, session_key: str):
+    """
+    清理 application.user_data 里与 session_key 相关的临时键（设置、Logs 视图等）。
+    """
+    try:
+        ud = application.user_data.get(user_id)
+        if not isinstance(ud, dict):
+            return
+        _safe_del(ud, f"temp_settings_{session_key}")
+        _safe_del(ud, f"logs_view_{session_key}")
+    except Exception:
+        pass
+
+
+async def _try_edit_message_text(
+    app: Application,
+    chat_id: int,
+    message_id: int,
+    text: str,
+):
+    try:
+        await app.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+    except BadRequest:
+        # 可能被用户删了 / 已不可编辑，直接忽略
+        return
+    except Exception:
+        return
+
+
+async def end_session(
+    *,
+    application: Application,
+    session_key: str,
+    reason_text: str,
+    user_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
+    message_id: Optional[int] = None,
+):
+    """
+    统一的“会话结束”入口：
+    - 取消超时 Job
+    - 删除临时文件
+    - 清理 user_sessions + user_data 的临时键
+    - 尝试把 UI 消息更新为结束文案（如能定位到 message）
+    """
+    # 1) 取消超时 Job
+    job = session_timeout_jobs.pop(session_key, None)
+    if job is not None:
+        try:
+            job.schedule_removal()
+        except Exception:
+            pass
+
+    # 2) 删除临时文件 & 清 session
+    session_data = user_sessions.get(session_key)
+    if session_data and isinstance(session_data, dict):
+        files = session_data.get("files") or []
+        for fp, _ in files:
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+
+        # 清理 user_data 里的 session 相关临时键
+        if user_id is not None:
+            _cleanup_session_userdata(application, user_id=user_id, session_key=session_key)
+
+        try:
+            del user_sessions[session_key]
+        except Exception:
+            pass
+
+    # 3) 尝试更新 UI（优先显式 chat_id/message_id，其次用 session_data 里记录的 ui_*）
+    final_chat_id = chat_id
+    final_message_id = message_id
+    if (final_chat_id is None or final_message_id is None) and session_data:
+        final_chat_id = final_chat_id or session_data.get("ui_chat_id")
+        final_message_id = final_message_id or session_data.get("ui_message_id")
+
+    if final_chat_id is not None and final_message_id is not None:
+        await _try_edit_message_text(application, int(final_chat_id), int(final_message_id), reason_text)
+
+
+async def _on_session_timeout(context: ContextTypes.DEFAULT_TYPE):
+    data = getattr(context.job, "data", None) or {}
+    session_key = data.get("session_key")
+    if not session_key:
+        return
+
+    # 已经结束就不重复处理
+    if session_key not in user_sessions:
+        session_timeout_jobs.pop(session_key, None)
+        return
+
+    await end_session(
+        application=context.application,
+        session_key=session_key,
+        reason_text="⏱️ 10分钟无操作，会话自动结束。",
+        user_id=data.get("user_id"),
+        chat_id=data.get("chat_id"),
+        message_id=data.get("message_id"),
+    )
+
+
+def touch_session(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    session_key: str,
+    user_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
+    message_id: Optional[int] = None,
+):
+    """
+    记录一次“交互”，并重置 10分钟超时 Job。
+    如果能拿到 chat_id/message_id，会同步写入 session_data 方便超时后更新 UI。
+    """
+    if session_key not in user_sessions:
+        return
+
+    sd = user_sessions.get(session_key, {})
+    sd["last_touch_ts"] = _now_hk().isoformat(timespec="seconds")
+    if chat_id is not None:
+        sd["ui_chat_id"] = int(chat_id)
+    if message_id is not None:
+        sd["ui_message_id"] = int(message_id)
+    user_sessions[session_key] = sd
+
+    # 重置超时 Job
+    old = session_timeout_jobs.pop(session_key, None)
+    if old is not None:
+        try:
+            old.schedule_removal()
+        except Exception:
+            pass
+
+    try:
+        job = context.application.job_queue.run_once(
+            _on_session_timeout,
+            when=SESSION_TIMEOUT_SECONDS,
+            data={
+                "session_key": session_key,
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "message_id": message_id,
+            },
+            name=f"session_timeout:{session_key}",
+        )
+        session_timeout_jobs[session_key] = job
+    except Exception:
+        # 没有 job_queue 或者调度失败就忽略（不影响主流程）
+        pass
 
 def get_gmail_service():
     creds = None
@@ -142,6 +308,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'settings': DEFAULT_SETTINGS.copy()
         }
 
+    # 任何文件上传也算一次交互，重置会话超时
+    touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
+
     os.makedirs('temp', exist_ok=True)
     file_id, file_name = None, None
     if message.document:
@@ -168,6 +337,18 @@ async def on_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
 
     # 将当前设置存入临时的 user_data，用于“取消”功能
     current_settings = user_sessions[session_key]['settings']
@@ -207,6 +388,18 @@ async def on_set_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     _, session_key, key, value = query.data.split('|')
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     
     # 修改临时设置
     temp_settings = context.user_data[f'temp_settings_{session_key}']
@@ -220,6 +413,18 @@ async def on_settings_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
 
     # 将临时设置保存回主 session
     user_sessions[session_key]['settings'] = context.user_data[f'temp_settings_{session_key}'].copy()
@@ -235,6 +440,18 @@ async def on_settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     
     original_settings = user_sessions[session_key]['settings']
     temp_settings = context.user_data.get(f'temp_settings_{session_key}')
@@ -256,6 +473,18 @@ async def on_settings_cancel_confirm(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     
     # 清理临时数据，不保存
     del context.user_data[f'temp_settings_{session_key}']
@@ -268,6 +497,18 @@ async def on_menu_settings_back(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     temp_settings = context.user_data[f'temp_settings_{session_key}']
     await show_settings_menu(update, context, session_key, temp_settings)
 
@@ -316,7 +557,8 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}"),
     ],
     [
-        InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}")
+        InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}"),
+        InlineKeyboardButton("🛑 结束会话", callback_data=f"end_session|{session_key}"),
     ]
     ]
 
@@ -324,14 +566,36 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.callback_query:
         await message.edit_text(ui_msg, reply_markup=reply_markup)
+        touch_session(
+            context=context,
+            session_key=session_key,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message.message_id,
+        )
     else:
-        await message.reply_text(ui_msg, reply_markup=reply_markup)
+        sent = await message.reply_text(ui_msg, reply_markup=reply_markup)
+        touch_session(
+            context=context,
+            session_key=session_key,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=sent.message_id,
+        )
 
 # 删除模式菜单逻辑 (列出所有文件带X)
 async def on_menu_delete_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     session_data = user_sessions.get(session_key, {'files': [], 'settings': DEFAULT_SETTINGS.copy()})
     files = session_data['files']
 
@@ -369,6 +633,14 @@ async def on_ask_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     _, session_key, index_str = query.data.split('|')
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     index = int(index_str)
     
     session_data = user_sessions.get(session_key, {'files': [], 'settings': DEFAULT_SETTINGS.copy()})
@@ -395,6 +667,14 @@ async def on_do_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("已删除")
     _, session_key, index_str = query.data.split('|')
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     index = int(index_str)
     
     session_data = user_sessions.get(session_key, {'files': [], 'settings': DEFAULT_SETTINGS.copy()})
@@ -418,6 +698,14 @@ async def on_ask_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     
     session_data = user_sessions.get(session_key, {'files': [], 'settings': DEFAULT_SETTINGS.copy()})
     files = session_data['files']
@@ -438,24 +726,40 @@ async def on_ask_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_do_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     session_key = query.data.split('|')[1]
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     
     session_data = user_sessions.get(session_key, {'files': [], 'settings': DEFAULT_SETTINGS.copy()})
     files = session_data['files']
     
-    for fp, _ in files:
-        try: os.remove(fp)
-        except: pass
-    
-    user_sessions[session_key]['files'] = []
-    
     await query.answer("所有附件已清空")
-    await query.edit_message_text("🗑️ 已全部删除。会话结束。")
-    # 此时不再显示任何按钮，流程结束
+    await end_session(
+        application=context.application,
+        session_key=session_key,
+        reason_text="🗑️ 已全部删除。会话结束。",
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
 
 # 返回主菜单
 async def on_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    session_key = query.data.split('|')[1]
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     # 直接复用 handle_mention 的逻辑来重新渲染主界面
     await handle_mention(update, context)
 
@@ -464,6 +768,14 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session_key = query.data.split('|')[1]
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     
     session_data = user_sessions.get(session_key)
     if not session_data or not session_data['files']:
@@ -491,15 +803,32 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success = send_email_with_attachments(gmail_service, file_paths, sender_info, file_names, settings)
     
     if success:
-        await query.edit_message_text(f"✅ 文件已发送到 {TARGET_EMAIL}")
+        await end_session(
+            application=context.application,
+            session_key=session_key,
+            reason_text=f"✅ 文件已发送到 {TARGET_EMAIL}\n会话结束。",
+            user_id=query.from_user.id,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+        )
     else:
         await query.edit_message_text("❌ 发送失败,请重试")
-    
-    # 清理session和临时文件
-    for fp in file_paths:
-        try: os.remove(fp)
-        except: pass
-    del user_sessions[session_key]
+        # 失败不结束会话，让用户可以重试/调整
+
+
+async def on_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    await end_session(
+        application=context.application,
+        session_key=session_key,
+        reason_text="🛑 会话已结束。",
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
 
 # --- 以下为 Logs 邮件处理相关辅助函数 ---
 def _now_hk() -> datetime:
@@ -612,6 +941,18 @@ async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     _get_logs_view(context, session_key)  # init
     await show_logs_menu(update, context, session_key)
 
@@ -619,6 +960,18 @@ async def on_logs_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     _, session_key, days = query.data.split("|")
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     view = _get_logs_view(context, session_key)
     view["days"] = int(days)
     view["page"] = 0
@@ -628,6 +981,18 @@ async def on_logs_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     _, session_key, mode = query.data.split("|")
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     view = _get_logs_view(context, session_key)
     view["mode"] = mode
     view["page"] = 0
@@ -637,6 +1002,18 @@ async def on_logs_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     _, session_key, delta = query.data.split("|")
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     view = _get_logs_view(context, session_key)
     logs = _filter_logs(read_logs_cache(), days=view["days"], mode=view["mode"])
     max_page = max(0, (len(logs) - 1) // LOGS_PER_PAGE)
@@ -653,6 +1030,21 @@ async def on_logs_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     session_key = query.data.split('|')[1]
+
+    if session_key not in user_sessions:
+        try:
+            await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        except Exception:
+            pass
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     days = _get_logs_view(context, session_key)["days"]
 
     try:
@@ -669,6 +1061,18 @@ async def on_log_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     _, session_key, log_id = query.data.split("|")
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
 
     logs = read_logs_cache()
     x = next((r for r in logs if str(r.get("id")) == str(log_id)), None)
@@ -698,6 +1102,18 @@ async def on_logs_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     await handle_mention(update, context)  # 回到你的主菜单渲染
 
 
@@ -914,6 +1330,9 @@ def main():
     app.add_handler(CallbackQueryHandler(on_settings_cancel, pattern=r"^settings_cancel\|"))
     app.add_handler(CallbackQueryHandler(on_settings_cancel_confirm, pattern=r"^settings_cancel_confirm\|"))
     app.add_handler(CallbackQueryHandler(on_menu_settings_back, pattern=r"^menu_settings_back\|"))
+
+    # 6.5 结束会话
+    app.add_handler(CallbackQueryHandler(on_end_session, pattern=r"^end_session\|"))
 
     # 7. Logs 菜单及交互逻辑
     app.add_handler(CallbackQueryHandler(on_menu_logs, pattern=r"^menu_logs\|"))
