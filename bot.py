@@ -150,7 +150,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.photo:
         photo_file = message.photo[-1]
         file_id = photo_file.file_id
-        file_name = f"{file_id}.jpg"
+        # 对于直接发送的图片，使用时间戳生成文件名
+        timestamp = message.date.astimezone(ZoneInfo("Asia/Hong_Kong")).strftime('%Y%m%d_%H%M%S')
+        file_name = f"photo_{timestamp}.jpg"
 
     if file_id and file_name:
         file = await context.bot.get_file(file_id)
