@@ -1,6 +1,8 @@
 import os
 import json
 import pickle
+import uuid
+import threading
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -35,6 +37,8 @@ from telegram.ext import Job
 # 日志缓存文件路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_CACHE_PATH = os.path.join(BASE_DIR, "logs_cache.json")
+OPS_LOG_DIR = os.path.join(BASE_DIR, "logs")
+_ops_log_lock = threading.Lock()
 
 LOGS_PER_PAGE = 8
 
@@ -82,6 +86,94 @@ SESSION_TIMEOUT_SECONDS = 10 * 60
 session_timeout_jobs: Dict[str, Job] = {}
 
 
+def _append_ops_log(record: Dict[str, Any]):
+    """
+    追加写入一条操作日志（JSONL）。
+    注意：不要在这里抛异常影响主流程。
+    """
+    try:
+        # 按日分目录：logs/YYYYMMDD/ops_log.jsonl
+        ts = record.get("ts")
+        try:
+            dt = datetime.fromisoformat(ts) if ts else _now_hk()
+        except Exception:
+            dt = _now_hk()
+        day = dt.astimezone(ZoneInfo("Asia/Hong_Kong")).strftime("%Y%m%d")
+        day_dir = os.path.join(OPS_LOG_DIR, day)
+        os.makedirs(day_dir, exist_ok=True)
+        daily_path = os.path.join(day_dir, "ops_log.jsonl")
+
+        line = json.dumps(record, ensure_ascii=False)
+        with _ops_log_lock:
+            with open(daily_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        return
+
+
+def _extract_actor_from_update(update: Optional[Update] = None) -> Dict[str, Any]:
+    if not update:
+        return {}
+    try:
+        if update.callback_query:
+            u = update.callback_query.from_user
+            chat = update.callback_query.message.chat if update.callback_query.message else None
+            msg = update.callback_query.message
+        else:
+            u = update.effective_user
+            chat = update.effective_chat
+            msg = update.effective_message
+
+        return {
+            "user_id": getattr(u, "id", None),
+            "username": getattr(u, "username", None),
+            "first_name": getattr(u, "first_name", None),
+            "last_name": getattr(u, "last_name", None),
+            "chat_id": getattr(chat, "id", None) if chat else None,
+            "chat_title": getattr(chat, "title", None) if chat else None,
+            "message_id": getattr(msg, "message_id", None) if msg else None,
+        }
+    except Exception:
+        return {}
+
+
+def log_event(
+    event: str,
+    *,
+    session_key: Optional[str] = None,
+    session_id: Optional[str] = None,
+    update: Optional[Update] = None,
+    extra: Optional[Dict[str, Any]] = None,
+):
+    """
+    写一条操作日志：谁在何处做了什么。
+    - event: 事件名（稳定字段，便于检索）
+    - extra: 事件细节（可扩展）
+    """
+    try:
+        actor = _extract_actor_from_update(update)
+        record = {
+            "ts": _now_hk().isoformat(timespec="seconds"),
+            "event": event,
+            "session_key": session_key,
+            "session_id": session_id,
+            **actor,
+            "extra": extra or {},
+        }
+        _append_ops_log(record)
+    except Exception:
+        return
+
+
+def _new_session_struct() -> Dict[str, Any]:
+    return {
+        "files": [],
+        "settings": DEFAULT_SETTINGS.copy(),
+        "session_id": uuid.uuid4().hex,
+        "created_ts": _now_hk().isoformat(timespec="seconds"),
+    }
+
+
 def _safe_del(d: dict, k: str):
     try:
         if d is not None and k in d:
@@ -124,6 +216,7 @@ async def end_session(
     application: Application,
     session_key: str,
     reason_text: str,
+    reason_code: str = "unknown",
     user_id: Optional[int] = None,
     chat_id: Optional[int] = None,
     message_id: Optional[int] = None,
@@ -143,9 +236,28 @@ async def end_session(
         except Exception:
             pass
 
-    # 2) 删除临时文件 & 清 session
+    # 2) 删除临时文件 & 清 session（并写结束日志）
     session_data = user_sessions.get(session_key)
     if session_data and isinstance(session_data, dict):
+        # 结束日志：尽量在删除前保留快照
+        try:
+            log_event(
+                "session_end",
+                session_key=session_key,
+                session_id=session_data.get("session_id"),
+                update=None,
+                extra={
+                    "reason_code": reason_code,
+                    "reason_text": reason_text,
+                    "file_count": len(session_data.get("files") or []),
+                    "settings": session_data.get("settings"),
+                    "created_ts": session_data.get("created_ts"),
+                    "last_touch_ts": session_data.get("last_touch_ts"),
+                },
+            )
+        except Exception:
+            pass
+
         files = session_data.get("files") or []
         for fp, _ in files:
             try:
@@ -188,6 +300,7 @@ async def _on_session_timeout(context: ContextTypes.DEFAULT_TYPE):
         application=context.application,
         session_key=session_key,
         reason_text="⏱️ 10分钟无操作，会话自动结束。",
+        reason_code="timeout",
         user_id=data.get("user_id"),
         chat_id=data.get("chat_id"),
         message_id=data.get("message_id"),
@@ -290,10 +403,10 @@ def send_email_with_attachments(service, file_paths, sender_info, file_names, se
             userId='me',
             body={'raw': raw_message}
         ).execute()
-        return True
+        return True, None
     except Exception as e:
         print(f"发送邮件失败: {e}")
-        return False
+        return False, str(e)
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -303,10 +416,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 如果是新session，创建完整结构
     if session_key not in user_sessions:
-        user_sessions[session_key] = {
-            'files': [],
-            'settings': DEFAULT_SETTINGS.copy()
-        }
+        user_sessions[session_key] = _new_session_struct()
+        log_event("session_start", session_key=session_key, session_id=user_sessions[session_key].get("session_id"), update=update)
 
     # 任何文件上传也算一次交互，重置会话超时
     touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
@@ -332,6 +443,24 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_sessions[session_key]['files'].append((file_path, file_name))
         await message.reply_text(f"已添加: {file_name}")
 
+        # 上传日志
+        try:
+            sd = user_sessions.get(session_key) or {}
+            log_event(
+                "file_added",
+                session_key=session_key,
+                session_id=sd.get("session_id"),
+                update=update,
+                extra={
+                    "file_name": file_name,
+                    "file_path": file_path,
+                    "file_kind": "document" if message.document else ("photo" if message.photo else "unknown"),
+                    "total_files": len(sd.get("files") or []),
+                },
+            )
+        except Exception:
+            pass
+
 # --- 进入设置菜单 ---
 async def on_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -353,6 +482,13 @@ async def on_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 将当前设置存入临时的 user_data，用于“取消”功能
     current_settings = user_sessions[session_key]['settings']
     context.user_data[f'temp_settings_{session_key}'] = current_settings.copy()
+
+    log_event(
+        "settings_open",
+        session_key=session_key,
+        session_id=user_sessions[session_key].get("session_id"),
+        update=update,
+    )
 
     await show_settings_menu(update, context, session_key, current_settings)
 
@@ -405,6 +541,14 @@ async def on_set_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_settings = context.user_data[f'temp_settings_{session_key}']
     temp_settings[key] = value
 
+    log_event(
+        "settings_change",
+        session_key=session_key,
+        session_id=user_sessions[session_key].get("session_id"),
+        update=update,
+        extra={"key": key, "value": value},
+    )
+
     # 重新渲染菜单以提供反馈
     await show_settings_menu(update, context, session_key, temp_settings)
 
@@ -431,6 +575,14 @@ async def on_settings_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     # 清理临时数据
     del context.user_data[f'temp_settings_{session_key}']
+
+    log_event(
+        "settings_confirm",
+        session_key=session_key,
+        session_id=user_sessions[session_key].get("session_id"),
+        update=update,
+        extra={"settings": user_sessions[session_key].get("settings")},
+    )
 
     # 返回主菜单
     await handle_mention(update, context)
@@ -462,6 +614,12 @@ async def on_settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await handle_mention(update, context)
     else:
         # 如果变了，弹出确认放弃的提示
+        log_event(
+            "settings_cancel_prompt",
+            session_key=session_key,
+            session_id=user_sessions[session_key].get("session_id"),
+            update=update,
+        )
         buttons = [[
             InlineKeyboardButton("是，放弃更改", callback_data=f"settings_cancel_confirm|{session_key}"),
             InlineKeyboardButton("否，继续编辑", callback_data=f"menu_settings_back|{session_key}")
@@ -489,6 +647,13 @@ async def on_settings_cancel_confirm(update: Update, context: ContextTypes.DEFAU
     # 清理临时数据，不保存
     del context.user_data[f'temp_settings_{session_key}']
     
+    log_event(
+        "settings_cancel_confirm",
+        session_key=session_key,
+        session_id=user_sessions[session_key].get("session_id"),
+        update=update,
+    )
+
     # 返回主菜单
     await handle_mention(update, context)
 
@@ -510,6 +675,13 @@ async def on_menu_settings_back(update: Update, context: ContextTypes.DEFAULT_TY
         message_id=query.message.message_id,
     )
     temp_settings = context.user_data[f'temp_settings_{session_key}']
+
+    log_event(
+        "settings_back_to_edit",
+        session_key=session_key,
+        session_id=user_sessions[session_key].get("session_id"),
+        update=update,
+    )
     await show_settings_menu(update, context, session_key, temp_settings)
 
 async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -529,10 +701,8 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 确保session存在
     if session_key not in user_sessions:
-        user_sessions[session_key] = {
-            'files': [],
-            'settings': DEFAULT_SETTINGS.copy()
-        }
+        user_sessions[session_key] = _new_session_struct()
+        log_event("session_start", session_key=session_key, session_id=user_sessions[session_key].get("session_id"), update=update)
         
     session_data = user_sessions[session_key]
     files = session_data['files']
@@ -598,6 +768,17 @@ async def on_menu_delete_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     session_data = user_sessions.get(session_key, {'files': [], 'settings': DEFAULT_SETTINGS.copy()})
     files = session_data['files']
+
+    try:
+        log_event(
+            "delete_menu_open",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={"file_count": len(files or [])},
+        )
+    except Exception:
+        pass
 
     # 构建文件按钮列表，每个文件一行，格式：[ ❌ 文件名  ]
     keyboard = []
@@ -681,6 +862,7 @@ async def on_do_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     files = session_data['files']
 
     if index < len(files):
+        target_file_name = files[index][1]
         # 删除物理文件
         file_path = files[index][0]
         try:
@@ -690,6 +872,21 @@ async def on_do_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 从列表中移除
         files.pop(index)
         user_sessions[session_key]['files'] = files  # 仅更新文件列表
+
+        try:
+            log_event(
+                "file_deleted",
+                session_key=session_key,
+                session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+                update=update,
+                extra={
+                    "file_name": target_file_name,
+                    "index": index,
+                    "remaining_files": len(files or []),
+                },
+            )
+        except Exception:
+            pass
 
     # 删除后，直接刷新回“删除模式菜单”
     await on_menu_delete_mode(update, context)
@@ -709,6 +906,17 @@ async def on_ask_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     session_data = user_sessions.get(session_key, {'files': [], 'settings': DEFAULT_SETTINGS.copy()})
     files = session_data['files']
+
+    try:
+        log_event(
+            "delete_all_prompt",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={"file_count": len(files or [])},
+        )
+    except Exception:
+        pass
     
     if not files:
          await query.answer("列表已经是空的了", show_alert=True)
@@ -743,6 +951,7 @@ async def on_do_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         application=context.application,
         session_key=session_key,
         reason_text="🗑️ 已全部删除。会话结束。",
+        reason_code="delete_all",
         user_id=query.from_user.id,
         chat_id=query.message.chat.id,
         message_id=query.message.message_id,
@@ -800,13 +1009,25 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gmail_service = get_gmail_service()
 
     # 把 settings 传给发送函数
-    success = send_email_with_attachments(gmail_service, file_paths, sender_info, file_names, settings)
+    log_event(
+        "send_attempt",
+        session_key=session_key,
+        session_id=session_data.get("session_id"),
+        update=update,
+        extra={
+            "file_names": list(file_names),
+            "file_count": len(file_names),
+            "settings": settings,
+        },
+    )
+    success, err = send_email_with_attachments(gmail_service, file_paths, sender_info, file_names, settings)
     
     if success:
         await end_session(
             application=context.application,
             session_key=session_key,
             reason_text=f"✅ 文件已发送到 {TARGET_EMAIL}\n会话结束。",
+            reason_code="send_success",
             user_id=query.from_user.id,
             chat_id=query.message.chat.id,
             message_id=query.message.message_id,
@@ -814,6 +1035,13 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("❌ 发送失败,请重试")
         # 失败不结束会话，让用户可以重试/调整
+        log_event(
+            "send_failed",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"error": err},
+        )
 
 
 async def on_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -825,6 +1053,7 @@ async def on_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         application=context.application,
         session_key=session_key,
         reason_text="🛑 会话已结束。",
+        reason_code="manual_end",
         user_id=query.from_user.id,
         chat_id=query.message.chat.id,
         message_id=query.message.message_id,
