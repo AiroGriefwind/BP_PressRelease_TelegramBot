@@ -3,6 +3,7 @@ import json
 import pickle
 import uuid
 import threading
+import urllib.parse
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -63,6 +64,63 @@ SCOPES = [
 ]
 
 TARGET_EMAIL = 'bp.filtermailbox@gmail.com'
+
+# --- FB URL（Facebook 分享链接）相关常量/辅助 ---
+FB_URL_BUTTON_TEXT = "FB URL"
+FB_URL_RECENT_SECONDS = 10 * 60  # “上一条URL”兜底：只取最近10分钟
+
+# 记录每个 (chat_id, user_id) 最近一次出现的 FB URL，支持“先发URL，再单独@bot”的兜底体验
+# key: session_key = f"{chat_id}_{user_id}"
+last_seen_fb_url: Dict[str, Dict[str, Any]] = {}
+
+def _extract_first_url(text: str) -> Optional[str]:
+    """
+    从文本中提取第一个 http(s) URL。
+    """
+    if not text:
+        return None
+    m = re.search(r"(https?://[^\s<>\]\)\"']+)", text.strip(), flags=re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+def _normalize_fb_url(url: str) -> str:
+    """
+    - 处理 Facebook 跳转链接（l.facebook.com/l.php?u=...）
+    - 做轻量清洗（去尾部标点）
+    """
+    if not url:
+        return ""
+    u = url.strip().strip(").,，。；;】]》>\"'")
+    try:
+        parsed = urllib.parse.urlparse(u)
+        host = (parsed.netloc or "").lower()
+        if host in ("l.facebook.com", "lm.facebook.com") and parsed.path.startswith("/l.php"):
+            q = urllib.parse.parse_qs(parsed.query or "")
+            inner = (q.get("u") or [None])[0]
+            if inner:
+                return urllib.parse.unquote(inner)
+    except Exception:
+        pass
+    return u
+
+def _looks_like_facebook_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.netloc or "").lower()
+        if not host:
+            return False
+        return (
+            host.endswith("facebook.com")
+            or host == "fb.com"
+            or host.endswith("fb.com")
+            or host.endswith("fb.watch")
+            or host.endswith("fb.me")
+        )
+    except Exception:
+        return False
 
 # 可选设置项
 SETTINGS_OPTIONS = {
@@ -171,6 +229,9 @@ def _new_session_struct() -> Dict[str, Any]:
         "settings": DEFAULT_SETTINGS.copy(),
         "session_id": uuid.uuid4().hex,
         "created_ts": _now_hk().isoformat(timespec="seconds"),
+        # FB URL 流程
+        "fb_url": None,
+        "awaiting_fb_url": False,
     }
 
 
@@ -206,6 +267,28 @@ async def _try_edit_message_text(
         await app.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
     except BadRequest:
         # 可能被用户删了 / 已不可编辑，直接忽略
+        return
+    except Exception:
+        return
+
+async def _try_edit_message_text_markup(
+    app: Application,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    *,
+    disable_web_page_preview: bool = False,
+):
+    try:
+        await app.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+    except BadRequest:
         return
     except Exception:
         return
@@ -251,6 +334,7 @@ async def end_session(
                     "reason_text": reason_text,
                     "file_count": len(session_data.get("files") or []),
                     "settings": session_data.get("settings"),
+                    "fb_url": session_data.get("fb_url"),
                     "created_ts": session_data.get("created_ts"),
                     "last_touch_ts": session_data.get("last_touch_ts"),
                 },
@@ -407,6 +491,61 @@ def send_email_with_attachments(service, file_paths, sender_info, file_names, se
     except Exception as e:
         print(f"发送邮件失败: {e}")
         return False, str(e)
+
+def send_email_with_fb_url(service, fb_url: str, sender_info: dict):
+    """
+    发送“FB URL”到目标邮箱（不带附件）。
+    """
+    message = MIMEMultipart()
+    message["to"] = TARGET_EMAIL
+    message["subject"] = f"[FB URL]: {fb_url}"
+
+    body = f"""URL: {fb_url}
+
+来自: {sender_info.get('name')} (@{sender_info.get('username')})
+群组: {sender_info.get('chat_title')}
+时间: {sender_info.get('date')}
+""".strip()
+
+    message.attach(MIMEText(body, "plain", "utf-8"))
+    raw_message = urlsafe_b64encode(message.as_bytes()).decode()
+    try:
+        service.users().messages().send(
+            userId="me",
+            body={"raw": raw_message},
+        ).execute()
+        return True, None
+    except Exception as e:
+        print(f"发送 FB URL 邮件失败: {e}")
+        return False, str(e)
+
+def _build_sender_info_from_message(message, fallback_user=None):
+    """
+    尽量从 UI message 的 reply_to_message 取到最初 @ 的发起者信息；
+    取不到则回退到当前点击按钮的人。
+    """
+    try:
+        src_msg = getattr(message, "reply_to_message", None) or message
+        u = getattr(src_msg, "from_user", None) or fallback_user
+        chat = getattr(message, "chat", None)
+        dt = getattr(message, "date", None)
+        # name
+        first = getattr(u, "first_name", "") or ""
+        last = getattr(u, "last_name", "") or ""
+        name = (first + (" " + last if last else "")).strip() or "unknown"
+        return {
+            "name": name,
+            "username": getattr(u, "username", None) or "unknown",
+            "chat_title": getattr(chat, "title", None) or "private",
+            "date": (dt.astimezone(ZoneInfo("Asia/Hong_Kong")).strftime("%Y-%m-%d %H:%M:%S") if dt else _now_hk().strftime("%Y-%m-%d %H:%M:%S")),
+        }
+    except Exception:
+        return {
+            "name": "unknown",
+            "username": "unknown",
+            "chat_title": "unknown",
+            "date": _now_hk().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -707,6 +846,72 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session_data = user_sessions[session_key]
     files = session_data['files']
     settings = session_data['settings']
+
+    # --- 可选增强：若用户在“@bot”文本或其 reply 的消息里带了 FB URL，直接进入确认发送界面 ---
+    if update.message:
+        candidate_texts = []
+        try:
+            candidate_texts.append(update.message.text or "")
+        except Exception:
+            pass
+        try:
+            if update.message.reply_to_message and getattr(update.message.reply_to_message, "text", None):
+                candidate_texts.append(update.message.reply_to_message.text or "")
+        except Exception:
+            pass
+
+        found_url = None
+        for t in candidate_texts:
+            u = _extract_first_url(t)
+            if u:
+                found_url = u
+                break
+
+        # 兜底：如果这条 @ 消息里没有URL，也没有 reply_to，尝试使用同一用户最近发过的 FB URL
+        if not found_url:
+            try:
+                rec = last_seen_fb_url.get(session_key)
+                if rec and rec.get("url") and rec.get("dt"):
+                    now_dt = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+                    if (now_dt - rec["dt"]).total_seconds() <= FB_URL_RECENT_SECONDS:
+                        found_url = rec["url"]
+            except Exception:
+                pass
+
+        if found_url:
+            norm = _normalize_fb_url(found_url)
+            if _looks_like_facebook_url(norm):
+                session_data["fb_url"] = norm
+                session_data["awaiting_fb_url"] = False
+                user_sessions[session_key] = session_data
+
+                log_event(
+                    "fb_url_detected",
+                    session_key=session_key,
+                    session_id=session_data.get("session_id"),
+                    update=update,
+                    extra={"fb_url": norm},
+                )
+
+                buttons = [[
+                    InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"),
+                    InlineKeyboardButton("✏️ 重新输入", callback_data=f"fb_url_menu|{session_key}"),
+                ], [
+                    InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"),
+                ]]
+                sent = await message.reply_text(
+                    f"已检测到 FB URL：\n{norm}\n\n是否发送到 {TARGET_EMAIL}？",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                    disable_web_page_preview=True,
+                )
+                touch_session(
+                    context=context,
+                    session_key=session_key,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    message_id=sent.message_id,
+                )
+                return
     
     file_names = [name for _, name in files]
     attach_list = "\n".join(file_names) if file_names else "暂无附件"
@@ -717,16 +922,24 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"優先度：{settings['priority']}\n"
         f"語言：{settings['language']}"
     )
-    ui_msg = f"附件列表：\n{attach_list}\n\n---\n\n{settings_text}"
+    fb_url_line = ""
+    try:
+        if session_data.get("fb_url"):
+            fb_url_line = f"\n\nFB URL：\n{session_data.get('fb_url')}"
+    except Exception:
+        fb_url_line = ""
 
-    # 构建按钮 （确认，删除，设置，Logs）
+    ui_msg = f"附件列表：\n{attach_list}\n\n---\n\n{settings_text}{fb_url_line}"
+
+    # 构建按钮 （确认，FB URL，删除，设置，Logs）
     buttons = [
     [
         InlineKeyboardButton("确认", callback_data=f"confirm_send|{session_key}"),
+        InlineKeyboardButton(FB_URL_BUTTON_TEXT, callback_data=f"fb_url_menu|{session_key}"),
         InlineKeyboardButton("删除", callback_data=f"menu_delete_mode|{session_key}"),
-        InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}"),
     ],
     [
+        InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}"),
         InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}"),
         InlineKeyboardButton("🛑 结束会话", callback_data=f"end_session|{session_key}"),
     ]
@@ -745,6 +958,262 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         sent = await message.reply_text(ui_msg, reply_markup=reply_markup)
+        touch_session(
+            context=context,
+            session_key=session_key,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=sent.message_id,
+        )
+
+
+async def on_fb_url_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    进入 FB URL 输入流程：提示用户发送 URL 文本。
+    如果 session 已有 fb_url，则展示确认发送界面（不必重新输入）。
+    """
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    sd = user_sessions.get(session_key) or {}
+    fb_url = sd.get("fb_url")
+
+    # 已经有 URL：直接进入确认发送
+    if fb_url:
+        buttons = [[
+            InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"),
+            InlineKeyboardButton("✏️ 重新输入", callback_data=f"fb_url_reset|{session_key}"),
+        ], [
+            InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"),
+        ]]
+        await query.edit_message_text(
+            f"当前 FB URL：\n{fb_url}\n\n是否发送到 {TARGET_EMAIL}？",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True,
+        )
+        return
+
+    # 没有 URL：进入输入状态
+    sd["awaiting_fb_url"] = True
+    sd["fb_url"] = None
+    user_sessions[session_key] = sd
+
+    log_event(
+        "fb_url_input_start",
+        session_key=session_key,
+        session_id=sd.get("session_id"),
+        update=update,
+    )
+
+    buttons = [[InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}")]]
+    await query.edit_message_text(
+        "请发送一条消息，内容为 Facebook 分享链接（URL）。\n我只会读取你“下一条”消息来作为 FB URL。",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        disable_web_page_preview=True,
+    )
+
+
+async def on_fb_url_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    sd = user_sessions.get(session_key) or {}
+    sd["fb_url"] = None
+    sd["awaiting_fb_url"] = True
+    user_sessions[session_key] = sd
+
+    log_event(
+        "fb_url_reset",
+        session_key=session_key,
+        session_id=sd.get("session_id"),
+        update=update,
+    )
+
+    buttons = [[InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}")]]
+    await query.edit_message_text(
+        "好的，请重新发送一条 Facebook 分享链接（URL）。\n我只会读取你“下一条”消息。",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        disable_web_page_preview=True,
+    )
+
+
+async def on_fb_url_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text("⚠️ 会话已结束，请重新@我开始。")
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    sd = user_sessions.get(session_key) or {}
+    fb_url = sd.get("fb_url")
+    if not fb_url:
+        await query.edit_message_text("⚠️ 尚未输入 FB URL，请先点 FB URL 并发送链接。")
+        return
+
+    await query.edit_message_text("正在发送 FB URL... 请稍后。", disable_web_page_preview=True)
+
+    sender_info = _build_sender_info_from_message(query.message, fallback_user=query.from_user)
+    gmail_service = get_gmail_service()
+
+    log_event(
+        "fb_url_send_attempt",
+        session_key=session_key,
+        session_id=sd.get("session_id"),
+        update=update,
+        extra={"fb_url": fb_url},
+    )
+
+    success, err = send_email_with_fb_url(gmail_service, fb_url, sender_info)
+
+    if success:
+        log_event(
+            "fb_url_send_success",
+            session_key=session_key,
+            session_id=sd.get("session_id"),
+            update=update,
+        )
+
+        # 和“附件发送成功”一致：直接结束会话
+        await end_session(
+            application=context.application,
+            session_key=session_key,
+            reason_text=f"✅ FB URL 已发送到 {TARGET_EMAIL}\n会话结束。",
+            reason_code="fb_url_send_success",
+            user_id=query.from_user.id,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+        )
+    else:
+        log_event(
+            "fb_url_send_failed",
+            session_key=session_key,
+            session_id=sd.get("session_id"),
+            update=update,
+            extra={"error": err},
+        )
+        buttons = [[InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}")]]
+        await query.edit_message_text(
+            "❌ FB URL 发送失败，请稍后重试。",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True,
+        )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    兜底文本处理：仅在用户处于“等待输入 FB URL”状态时消费下一条消息。
+    """
+    message = update.message
+    if not message or not message.text:
+        return
+
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    session_key = f"{chat_id}_{user_id}"
+
+    # 记录“最近出现的 FB URL”（不要求 session 已存在）
+    try:
+        maybe_url = _extract_first_url(message.text or "")
+        if maybe_url:
+            norm = _normalize_fb_url(maybe_url)
+            if _looks_like_facebook_url(norm):
+                last_seen_fb_url[session_key] = {
+                    "url": norm,
+                    "dt": datetime.now(ZoneInfo("Asia/Hong_Kong")),
+                }
+    except Exception:
+        pass
+
+    sd = user_sessions.get(session_key)
+    if not sd or not sd.get("awaiting_fb_url"):
+        return
+
+    touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
+
+    raw_url = _extract_first_url(message.text or "")
+    if not raw_url:
+        await message.reply_text("⚠️ 没检测到 URL。请直接发送一条包含 Facebook 分享链接的消息。")
+        return
+
+    norm = _normalize_fb_url(raw_url)
+    if not _looks_like_facebook_url(norm):
+        await message.reply_text("⚠️ 目前只支持 Facebook 相关链接。请重新发送 FB 分享链接。")
+        return
+
+    sd["fb_url"] = norm
+    sd["awaiting_fb_url"] = False
+    user_sessions[session_key] = sd
+
+    log_event(
+        "fb_url_captured",
+        session_key=session_key,
+        session_id=sd.get("session_id"),
+        update=update,
+        extra={"fb_url": norm},
+    )
+
+    # 尝试更新 UI 消息为“确认发送”界面
+    ui_chat_id = sd.get("ui_chat_id")
+    ui_message_id = sd.get("ui_message_id")
+    if ui_chat_id is not None and ui_message_id is not None:
+        buttons = [[
+            InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"),
+            InlineKeyboardButton("✏️ 重新输入", callback_data=f"fb_url_reset|{session_key}"),
+        ], [
+            InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"),
+        ]]
+        await _try_edit_message_text_markup(
+            context.application,
+            int(ui_chat_id),
+            int(ui_message_id),
+            f"已收到 FB URL：\n{norm}\n\n是否发送到 {TARGET_EMAIL}？",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True,
+        )
+    else:
+        # 没有 UI message 可编辑就直接发一条确认消息
+        buttons = [[InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}")]]
+        sent = await message.reply_text(
+            f"已收到 FB URL：\n{norm}\n\n是否发送到 {TARGET_EMAIL}？",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            disable_web_page_preview=True,
+        )
         touch_session(
             context=context,
             session_key=session_key,
@@ -1528,11 +1997,22 @@ def main():
     with open('config.json', 'r') as f:
         config = json.load(f)
     BOT_TOKEN = config['telegram_token']
+
+    # 可选：从 config.json 覆盖目标邮箱
+    global TARGET_EMAIL
+    try:
+        if isinstance(config, dict) and config.get("target_email"):
+            TARGET_EMAIL = str(config.get("target_email")).strip()
+    except Exception:
+        pass
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     # 消息处理器
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'@'), handle_mention))
+    # 兜底文本（只在 awaiting_fb_url 时处理）
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Callback 处理器
     # 1. 发送确认
@@ -1562,6 +2042,11 @@ def main():
 
     # 6.5 结束会话
     app.add_handler(CallbackQueryHandler(on_end_session, pattern=r"^end_session\|"))
+
+    # 6.6 FB URL 流程
+    app.add_handler(CallbackQueryHandler(on_fb_url_menu, pattern=r"^fb_url_menu\|"))
+    app.add_handler(CallbackQueryHandler(on_fb_url_reset, pattern=r"^fb_url_reset\|"))
+    app.add_handler(CallbackQueryHandler(on_fb_url_send, pattern=r"^fb_url_send\|"))
 
     # 7. Logs 菜单及交互逻辑
     app.add_handler(CallbackQueryHandler(on_menu_logs, pattern=r"^menu_logs\|"))
