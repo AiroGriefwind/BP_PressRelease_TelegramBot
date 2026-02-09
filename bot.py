@@ -248,6 +248,10 @@ def _new_session_struct() -> Dict[str, Any]:
         "photo_seq": 0,
         "sending": False,
         "sending_snapshot": [],
+        # 附件回执 UI（避免群聊刷屏/触发频控）
+        "add_msg_id": None,
+        "add_msg_ts": 0.0,
+        "add_msg_count": 0,
     }
 
 
@@ -483,7 +487,7 @@ def get_google_creds():
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
                 'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
         with open('token.pickle', 'wb') as token:
             pickle.dump(creds, token)
     return creds
@@ -931,7 +935,34 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 存储文件
         session_data["files"].append((file_path, file_name))
-        await message.reply_text(f"已添加: {file_name}")
+
+        # 附件回执：合并为一条消息定期更新，避免频控导致中断
+        try:
+            session_data["add_msg_count"] = int(session_data.get("add_msg_count") or 0) + 1
+        except Exception:
+            session_data["add_msg_count"] = 1
+        now_ts = time.time()
+        should_update = False
+        if not session_data.get("add_msg_id"):
+            should_update = True
+        elif (now_ts - float(session_data.get("add_msg_ts") or 0)) >= 1.0:
+            should_update = True
+        elif session_data["add_msg_count"] % 5 == 0:
+            should_update = True
+
+        if should_update:
+            text = f"已添加: {file_name}\n当前累计: {session_data['add_msg_count']} 个"
+            if session_data.get("add_msg_id"):
+                await _try_edit_message_text(
+                    context.application,
+                    chat_id=message.chat.id,
+                    message_id=session_data["add_msg_id"],
+                    text=text,
+                )
+            else:
+                sent = await message.reply_text(text)
+                session_data["add_msg_id"] = sent.message_id
+            session_data["add_msg_ts"] = now_ts
 
         # 上传日志
         try:
@@ -1861,45 +1892,37 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_units = (2 + (len(file_names) * 2) + 1) if drive_mode else 3
     done_units = 0
 
-    last_ui_ts = 0.0
     progress_active = True
+    progress_state = {
+        "percent": 0,
+        "status": "准备附件",
+        "dirty": True,
+    }
 
-    loop = asyncio.get_running_loop()
+    async def _progress_loop():
+        last_text = ""
+        while progress_active:
+            if progress_state["dirty"]:
+                text = f"进度: {_render_progress_bar(progress_state['percent'])}\n当前步骤：{progress_state['status']}"
+                if text != last_text:
+                    await _try_edit_query_message(query, text)
+                    last_text = text
+                progress_state["dirty"] = False
+            await asyncio.sleep(5.0)
+
+    progress_task = asyncio.create_task(_progress_loop())
 
     def _progress_update(status: str, inc: int = 0):
         nonlocal done_units
-        nonlocal last_ui_ts
-        nonlocal progress_active
+        nonlocal progress_state
         if not progress_active:
             return
         if inc:
             done_units = min(total_units, done_units + inc)
         percent = int(round((done_units / total_units) * 100)) if total_units else 0
-        async def _do_update():
-            nonlocal last_ui_ts
-            nonlocal progress_active
-            now = time.time()
-            wait = max(0.0, 0.3 - (now - last_ui_ts))
-            if wait > 0:
-                await asyncio.sleep(wait)
-            if not progress_active:
-                return
-            await _try_edit_query_message(
-                query,
-                f"进度: {_render_progress_bar(percent)}\n当前步骤：{status}",
-            )
-            last_ui_ts = time.time()
-
-        def _schedule():
-            try:
-                asyncio.create_task(_do_update())
-            except Exception:
-                return
-
-        try:
-            loop.call_soon_threadsafe(_schedule)
-        except Exception:
-            return
+        progress_state["percent"] = percent
+        progress_state["status"] = status
+        progress_state["dirty"] = True
 
     _progress_update("准备附件", 0)
 
@@ -2005,6 +2028,10 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         done_units = total_units
         _progress_update("发送完成", 0)
         progress_active = False
+        try:
+            progress_task.cancel()
+        except Exception:
+            pass
         # 清理已发送的快照文件
         for fp, _ in (sending_snapshot or []):
             try:
@@ -2031,6 +2058,11 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=query.message.message_id,
             )
     else:
+        progress_active = False
+        try:
+            progress_task.cancel()
+        except Exception:
+            pass
         await query.edit_message_text("❌ 发送失败,请重试")
         # 失败不结束会话，让用户可以重试/调整
         # 把快照还原回列表（避免漏图）
