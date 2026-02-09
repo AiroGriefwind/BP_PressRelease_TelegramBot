@@ -4,6 +4,8 @@ import pickle
 import uuid
 import threading
 import urllib.parse
+import tempfile
+import time
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -242,6 +244,10 @@ def _new_session_struct() -> Dict[str, Any]:
         # FB URL 流程
         "fb_url": None,
         "awaiting_fb_url": False,
+        # 大批量图片发送辅助
+        "photo_seq": 0,
+        "sending": False,
+        "sending_snapshot": [],
     }
 
 
@@ -300,6 +306,17 @@ async def _try_edit_message_text_markup(
         )
     except BadRequest:
         return
+    except Exception:
+        return
+
+def _render_progress_bar(percent: int, width: int = 10) -> str:
+    p = max(0, min(100, int(percent)))
+    filled = int(round(p / 100 * width))
+    return f"[{'#' * filled}{'-' * (width - filled)}] {p}%"
+
+async def _try_edit_query_message(query, text: str):
+    try:
+        await query.edit_message_text(text)
     except Exception:
         return
 
@@ -377,6 +394,12 @@ async def end_session(
 
     if final_chat_id is not None and final_message_id is not None:
         await _try_edit_message_text(application, int(final_chat_id), int(final_message_id), reason_text)
+
+    # 清除上一条 FB URL 兜底记录，避免影响下一会话
+    try:
+        last_seen_fb_url.pop(session_key, None)
+    except Exception:
+        pass
 
 
 async def _on_session_timeout(context: ContextTypes.DEFAULT_TYPE):
@@ -481,6 +504,33 @@ def _format_gapi_error(e: Exception) -> str:
         return f"HTTP {getattr(e.resp, 'status', 'unknown')}: {msg}"
     return str(e)
 
+def _is_retryable_gapi_error(e: Exception) -> bool:
+    if isinstance(e, HttpError):
+        status = getattr(e.resp, "status", None)
+        if status in (429, 500, 502, 503, 504):
+            return True
+        try:
+            payload = json.loads(e.content.decode("utf-8", errors="ignore"))
+            msg = (payload.get("error", {}).get("message") or "").lower()
+            if "transient" in msg or "backend error" in msg:
+                return True
+        except Exception:
+            pass
+    return False
+
+def _execute_with_retry(fn, *, max_attempts: int = 4, base_sleep: float = 1.0):
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_error = e
+            if attempt >= max_attempts or not _is_retryable_gapi_error(e):
+                raise
+            time.sleep(base_sleep * (2 ** (attempt - 1)))
+    if last_error:
+        raise last_error
+
 def _escape_drive_query_value(value: str) -> str:
     return (value or "").replace("\\", "\\\\").replace("'", "\\'")
 
@@ -496,6 +546,9 @@ def _is_photo_name(name: str) -> bool:
     n = (name or "").lower()
     image_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".tiff")
     return n.endswith(image_exts)
+
+def _has_non_photo(file_names: List[str]) -> bool:
+    return any((n and not _is_photo_name(n)) for n in (file_names or []))
 
 def _pick_attachment_title(file_names: List[str]) -> str:
     for n in file_names:
@@ -541,18 +594,22 @@ def ensure_drive_folder(service, name: str, parent_id: str) -> str:
         f"and name='{_escape_drive_query_value(safe_name)}' "
         f"and '{parent_id}' in parents and trashed=false"
     )
-    resp = service.files().list(q=q, fields="files(id,name)").execute()
+    resp = _execute_with_retry(
+        lambda: service.files().list(q=q, fields="files(id,name)").execute()
+    )
     files = resp.get("files", []) or []
     if files:
         return files[0].get("id")
-    created = service.files().create(
-        body={
-            "name": safe_name,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [parent_id],
-        },
-        fields="id",
-    ).execute()
+    created = _execute_with_retry(
+        lambda: service.files().create(
+            body={
+                "name": safe_name,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [parent_id],
+            },
+            fields="id",
+        ).execute()
+    )
     return created.get("id")
 
 def upload_files_to_drive(
@@ -562,6 +619,7 @@ def upload_files_to_drive(
     folder_id=None,
     root_folder_name: str = DRIVE_ROOT_FOLDER_NAME,
     date_dt: Optional[datetime] = None,
+    progress_cb=None,
 ):
     # 目录结构：根/大批量图片/YYYY/MMDD/文章标题
     dt = date_dt or _now_hk()
@@ -570,6 +628,8 @@ def upload_files_to_drive(
     title = _pick_attachment_title(file_names)
 
     try:
+        if progress_cb:
+            progress_cb("查找/创建 Drive 文件夹", 0)
         base_parent = folder_id or "root"
         root_id = ensure_drive_folder(service, root_folder_name, base_parent)
         year_id = ensure_drive_folder(service, year, root_id)
@@ -577,10 +637,16 @@ def upload_files_to_drive(
         title_id = ensure_drive_folder(service, title, day_id)
 
         # 设文件夹为任何人可读
-        service.permissions().create(
-            fileId=title_id,
-            body={"type": "anyone", "role": "reader"},
-        ).execute()
+        if progress_cb:
+            progress_cb("设置 Drive 文件夹权限", 0)
+        _execute_with_retry(
+            lambda: service.permissions().create(
+                fileId=title_id,
+                body={"type": "anyone", "role": "reader"},
+            ).execute()
+        )
+        if progress_cb:
+            progress_cb("Drive 文件夹已就绪", 2)
     except Exception as e:
         return False, _format_gapi_error(e), None
 
@@ -589,19 +655,29 @@ def upload_files_to_drive(
         try:
             metadata = {"name": file_name, "parents": [title_id]}
             media = MediaFileUpload(file_path, resumable=True)
-            created = service.files().create(
-                body=metadata,
-                media_body=media,
-                fields="id,webViewLink",
-            ).execute()
+            if progress_cb:
+                progress_cb(f'正在上传“{file_name}”....', 0)
+            created = _execute_with_retry(
+                lambda: service.files().create(
+                    body=metadata,
+                    media_body=media,
+                    fields="id,webViewLink",
+                ).execute()
+            )
             file_id = created.get("id")
             if not file_id:
                 return False, f"上传失败：未返回 fileId ({file_name})", None
+            if progress_cb:
+                progress_cb(f'上传完成，设置文件权限“{file_name}”', 1)
             # 设为任何人可读（双保险）
-            service.permissions().create(
-                fileId=file_id,
-                body={"type": "anyone", "role": "reader"},
-            ).execute()
+            _execute_with_retry(
+                lambda: service.permissions().create(
+                    fileId=file_id,
+                    body={"type": "anyone", "role": "reader"},
+                ).execute()
+            )
+            if progress_cb:
+                progress_cb(f'文件权限已设置“{file_name}”', 1)
             link = created.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
             items.append({"name": file_name, "id": file_id, "link": link})
         except Exception as e:
@@ -675,7 +751,16 @@ def send_email_with_attachments(service, file_paths, sender_info, file_names, se
         print(f"发送邮件失败: {e}")
         return False, str(e)
 
-def send_email_with_drive_links(service, sender_info, file_items, settings, folder_link=None, title: str = ""):
+def send_email_with_drive_links(
+    service,
+    sender_info,
+    file_items,
+    settings,
+    folder_link=None,
+    title: str = "",
+    attachment_paths: Optional[List[str]] = None,
+    attachment_names: Optional[List[str]] = None,
+):
     message = MIMEMultipart()
     message["to"] = TARGET_EMAIL
     subject_title = title or "附件"
@@ -684,8 +769,6 @@ def send_email_with_drive_links(service, sender_info, file_items, settings, fold
         subject = subject[:MAX_SUBJECT_LEN - 3] + "..."
     message["subject"] = subject
 
-    links = "\n".join([f"- {x.get('name')}: {x.get('link')}" for x in file_items])
-    folder_line = f"\n文件夹链接: {folder_link}\n" if folder_link else ""
     body = f"""
 来自: {sender_info['name']} (@{sender_info['username']})
 群组: {sender_info['chat_title']}
@@ -693,11 +776,43 @@ def send_email_with_drive_links(service, sender_info, file_items, settings, fold
 類型：{settings['type']}
 優先度：{settings['priority']}
 語言：{settings['language']}
-
-Drive 共享链接:{folder_line}
-{links}
 """
     message.attach(MIMEText(body, "plain", "utf-8"))
+    attachment_paths = attachment_paths or []
+    attachment_names = attachment_names or []
+    for file_path, file_name in zip(attachment_paths, attachment_names):
+        try:
+            with open(file_path, "rb") as f:
+                part = MIMEApplication(f.read(), Name=file_name)
+                filename_utf8 = str(Header(file_name, "utf-8"))
+                part.add_header("Content-Disposition", f'attachment; filename="{filename_utf8}"')
+                message.attach(part)
+        except Exception:
+            continue
+
+    json_temp_path = None
+    try:
+        json_payload = {
+            "title": title or "",
+            "folder_link": folder_link or "",
+            "files": [
+                {"name": x.get("name"), "url": x.get("link")}
+                for x in (file_items or [])
+            ],
+            "generated_at": _now_hk().isoformat(timespec="seconds"),
+        }
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        json_temp_path = tmp.name
+        tmp.close()
+        with open(json_temp_path, "w", encoding="utf-8") as f:
+            json.dump(json_payload, f, ensure_ascii=False, indent=2)
+
+        with open(json_temp_path, "rb") as f:
+            part = MIMEApplication(f.read(), Name="drive_links.json")
+            part.add_header("Content-Disposition", 'attachment; filename="drive_links.json"')
+            message.attach(part)
+    except Exception:
+        pass
     raw_message = urlsafe_b64encode(message.as_bytes()).decode()
     try:
         service.users().messages().send(
@@ -708,6 +823,12 @@ Drive 共享链接:{folder_line}
     except Exception as e:
         print(f"发送 Drive 链接邮件失败: {e}")
         return False, str(e)
+    finally:
+        if json_temp_path:
+            try:
+                os.remove(json_temp_path)
+            except Exception:
+                pass
 
 def send_email_with_fb_url(service, fb_url: str, sender_info: dict):
     """
@@ -774,6 +895,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if session_key not in user_sessions:
         user_sessions[session_key] = _new_session_struct()
         log_event("session_start", session_key=session_key, session_id=user_sessions[session_key].get("session_id"), update=update)
+        # 新会话开始时清除上一条 FB URL 兜底记录，避免串会话
+        try:
+            last_seen_fb_url.pop(session_key, None)
+        except Exception:
+            pass
+
+    session_data = user_sessions[session_key]
 
     # 任何文件上传也算一次交互，重置会话超时
     touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
@@ -786,25 +914,28 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.photo:
         photo_file = message.photo[-1]
         file_id = photo_file.file_id
-        # 对于直接发送的图片，使用时间戳 + 唯一ID，避免同秒/重复名覆盖
-        timestamp = message.date.astimezone(ZoneInfo("Asia/Hong_Kong")).strftime('%Y%m%d_%H%M%S')
-        suffix = getattr(photo_file, "file_unique_id", "") or file_id[-6:]
-        file_name = f"photo_{timestamp}_{suffix}.jpg"
+        # 对于图片，按序号命名，避免乱码；序号在同一会话内递增
+        try:
+            session_data["photo_seq"] = int(session_data.get("photo_seq") or 0) + 1
+        except Exception:
+            session_data["photo_seq"] = 1
+        file_name = f"photo_{session_data['photo_seq']}.jpg"
 
     if file_id and file_name:
-        existing_names = [name for _, name in user_sessions[session_key].get('files', [])]
+        existing_names = [name for _, name in session_data.get("files", [])]
+        existing_names += [name for _, name in session_data.get("sending_snapshot", [])]
         file_name = _make_unique_filename(file_name, existing_names)
         file = await context.bot.get_file(file_id)
         file_path = f"temp/{file_name}"
         await file.download_to_drive(file_path)
         
         # 存储文件
-        user_sessions[session_key]['files'].append((file_path, file_name))
+        session_data["files"].append((file_path, file_name))
         await message.reply_text(f"已添加: {file_name}")
 
         # 上传日志
         try:
-            sd = user_sessions.get(session_key) or {}
+            sd = session_data or {}
             log_event(
                 "file_added",
                 session_key=session_key,
@@ -1137,6 +1268,7 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     attach_list = "\n".join(file_names) if file_names else "暂无附件"
     total_bytes = _total_size_bytes(files)
     total_size_text = _format_size(total_bytes) if files else ""
+    has_non_photo = _has_non_photo(file_names)
     auto_drive = total_bytes > (DRIVE_AUTO_SIZE_MB * 1024 * 1024) if files else False
     drive_mode = USE_DRIVE_SHARE or auto_drive
 
@@ -1153,10 +1285,16 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         fb_url_line = ""
 
+    remind_line = ""
+    if not has_non_photo:
+        if total_size_text:
+            remind_line = f"\n\n⚠️ 尚未添加公关稿本体（非图片附件）。当前总大小：{total_size_text}"
+        else:
+            remind_line = "\n\n⚠️ 尚未添加公关稿本体（非图片附件）。"
     size_line = ""
     if drive_mode and files:
         size_line = f"\n\n总大小：{total_size_text}\n已超过 {DRIVE_AUTO_SIZE_MB}MB，将改用 Drive 共享链接发送。"
-    ui_msg = f"附件列表：\n{attach_list}{size_line}\n\n---\n\n{settings_text}{fb_url_line}"
+    ui_msg = f"附件列表：\n{attach_list}{remind_line}{size_line}\n\n---\n\n{settings_text}{fb_url_line}"
 
     # 构建按钮 （确认，FB URL，删除，设置，Logs）
     buttons = [
@@ -1705,11 +1843,65 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ 没有附件，请先上传文件或图片。")
         return
 
-    files = session_data['files']
+    # 发送期间可能继续收到新附件：用快照发送，避免遗漏/覆盖
+    sending_snapshot = list(session_data.get("files") or [])
+    session_data["sending_snapshot"] = sending_snapshot
+    session_data["files"] = []
+    session_data["sending"] = True
+
+    files = sending_snapshot
     settings = session_data['settings']
     message = query.message # 需要用 message 对象获取发件人信息
 
-    await query.edit_message_text("正在打包并发送所有附件... 请稍后。")
+    file_paths, file_names = zip(*files)
+    total_bytes = _total_size_bytes(files)
+    auto_drive = total_bytes > (DRIVE_AUTO_SIZE_MB * 1024 * 1024)
+    drive_mode = USE_DRIVE_SHARE or auto_drive
+
+    total_units = (2 + (len(file_names) * 2) + 1) if drive_mode else 3
+    done_units = 0
+
+    last_ui_ts = 0.0
+    progress_active = True
+
+    loop = asyncio.get_running_loop()
+
+    def _progress_update(status: str, inc: int = 0):
+        nonlocal done_units
+        nonlocal last_ui_ts
+        nonlocal progress_active
+        if not progress_active:
+            return
+        if inc:
+            done_units = min(total_units, done_units + inc)
+        percent = int(round((done_units / total_units) * 100)) if total_units else 0
+        async def _do_update():
+            nonlocal last_ui_ts
+            nonlocal progress_active
+            now = time.time()
+            wait = max(0.0, 0.3 - (now - last_ui_ts))
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if not progress_active:
+                return
+            await _try_edit_query_message(
+                query,
+                f"进度: {_render_progress_bar(percent)}\n当前步骤：{status}",
+            )
+            last_ui_ts = time.time()
+
+        def _schedule():
+            try:
+                asyncio.create_task(_do_update())
+            except Exception:
+                return
+
+        try:
+            loop.call_soon_threadsafe(_schedule)
+        except Exception:
+            return
+
+    _progress_update("准备附件", 0)
 
     # 构建发件人信息
     sender_info = {
@@ -1719,11 +1911,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'date': message.date.astimezone(ZoneInfo("Asia/Hong_Kong")).strftime('%Y-%m-%d %H:%M:%S')
     }
     
-    file_paths, file_names = zip(*files)
     gmail_service = get_gmail_service()
-    total_bytes = _total_size_bytes(files)
-    auto_drive = total_bytes > (DRIVE_AUTO_SIZE_MB * 1024 * 1024)
-    drive_mode = USE_DRIVE_SHARE or auto_drive
 
     # 把 settings 传给发送函数
     log_event(
@@ -1738,6 +1926,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         },
     )
     if drive_mode:
+        _progress_update("准备上传到 Drive", 0)
         drive_service = get_drive_service()
         dt = message.date.astimezone(ZoneInfo("Asia/Hong_Kong"))
         log_event(
@@ -1747,13 +1936,15 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update=update,
             extra={"file_count": len(file_names)},
         )
-        ok, err, file_items = upload_files_to_drive(
+        ok, err, file_items = await asyncio.to_thread(
+            upload_files_to_drive,
             drive_service,
             list(file_paths),
             list(file_names),
             folder_id=DRIVE_FOLDER_ID,
             root_folder_name=DRIVE_ROOT_FOLDER_NAME,
             date_dt=dt,
+            progress_cb=_progress_update,
         )
         if not ok:
             await query.edit_message_text(f"❌ Drive 上传失败，请重试。\n原因：{err}")
@@ -1776,34 +1967,77 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "folder_title": (file_items or {}).get("title"),
             },
         )
-        success, err = send_email_with_drive_links(
+        _progress_update("生成 Drive 链接 JSON", 0)
+        _progress_update("发送邮件", 1)
+        non_photo_files = [
+            (fp, fn) for fp, fn in zip(file_paths, file_names) if not _is_photo_name(fn)
+        ]
+        attach_paths = [fp for fp, _ in non_photo_files]
+        attach_names = [fn for _, fn in non_photo_files]
+        success, err = await asyncio.to_thread(
+            send_email_with_drive_links,
             gmail_service,
             sender_info,
             (file_items or {}).get("items") or [],
             settings,
             folder_link=(file_items or {}).get("folder_link"),
             title=(file_items or {}).get("title") or "",
+            attachment_paths=attach_paths,
+            attachment_names=attach_names,
         )
         drive_folder_link = (file_items or {}).get("folder_link")
     else:
-        success, err = send_email_with_attachments(gmail_service, file_paths, sender_info, file_names, settings)
+        _progress_update("打包附件", 1)
+        _progress_update("发送邮件", 1)
+        success, err = await asyncio.to_thread(
+            send_email_with_attachments,
+            gmail_service,
+            file_paths,
+            sender_info,
+            file_names,
+            settings,
+        )
     
     if success:
         extra_link = ""
         if drive_mode and drive_folder_link:
             extra_link = f"\n\nDrive 文件夹：\n{drive_folder_link}"
-        await end_session(
-            application=context.application,
-            session_key=session_key,
-            reason_text=f"✅ 文件已发送到 {TARGET_EMAIL}\n会话结束。{extra_link}",
-            reason_code="send_success",
-            user_id=query.from_user.id,
-            chat_id=query.message.chat.id,
-            message_id=query.message.message_id,
-        )
+        done_units = total_units
+        _progress_update("发送完成", 0)
+        progress_active = False
+        # 清理已发送的快照文件
+        for fp, _ in (sending_snapshot or []):
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+        session_data["sending_snapshot"] = []
+        session_data["sending"] = False
+
+        if session_data.get("files"):
+            await _try_edit_query_message(
+                query,
+                f"✅ 本批已发送到 {TARGET_EMAIL}\n检测到新增附件，已保留在列表中，请继续发送。{extra_link}",
+            )
+            await handle_mention(update, context)
+        else:
+            await end_session(
+                application=context.application,
+                session_key=session_key,
+                reason_text=f"✅ 文件已发送到 {TARGET_EMAIL}\n会话结束。{extra_link}",
+                reason_code="send_success",
+                user_id=query.from_user.id,
+                chat_id=query.message.chat.id,
+                message_id=query.message.message_id,
+            )
     else:
         await query.edit_message_text("❌ 发送失败,请重试")
         # 失败不结束会话，让用户可以重试/调整
+        # 把快照还原回列表（避免漏图）
+        if sending_snapshot:
+            session_data["files"] = sending_snapshot + (session_data.get("files") or [])
+        session_data["sending_snapshot"] = []
+        session_data["sending"] = False
         log_event(
             "send_failed",
             session_key=session_key,
