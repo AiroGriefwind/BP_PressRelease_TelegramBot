@@ -11,7 +11,13 @@ from core.logging_ops import log_event
 from core.session import end_session, last_seen_fb_url, new_session_struct, touch_session, user_sessions
 from core.time_utils import now_hk
 from features.batch_images import send_drive_mode
-from features.fb_url import _extract_first_url, _looks_like_facebook_url, _normalize_fb_url
+from features.fb_url import (
+    _build_fb_url_confirm_markup,
+    _build_fb_url_confirm_text,
+    _extract_first_url,
+    _looks_like_facebook_url,
+    _normalize_fb_url,
+)
 from integrations.drive import (
     _format_size,
     _has_non_photo,
@@ -399,24 +405,10 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     extra={"fb_url": norm},
                 )
 
-                buttons = [
-                    [
-                        InlineKeyboardButton(
-                            "✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"
-                        ),
-                        InlineKeyboardButton(
-                            "✏️ 重新输入", callback_data=f"fb_url_menu|{session_key}"
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"
-                        ),
-                    ],
-                ]
+                buttons = _build_fb_url_confirm_markup(session_key)
                 sent = await message.reply_text(
-                    f"已检测到 FB URL：\n{norm}\n\n是否发送到 {config.TARGET_EMAIL}？",
-                    reply_markup=InlineKeyboardMarkup(buttons),
+                    _build_fb_url_confirm_text(norm, settings, detected=True),
+                    reply_markup=buttons,
                     disable_web_page_preview=True,
                 )
                 touch_session(

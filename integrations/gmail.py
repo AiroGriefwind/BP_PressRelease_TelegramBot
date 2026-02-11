@@ -175,7 +175,7 @@ def send_email_with_drive_links(
         return False, str(e)
 
 
-def send_email_with_fb_url(service, fb_url: str, sender_info: dict):
+def send_email_with_fb_url(service, fb_url: str, sender_info: dict, settings: dict):
     message = MIMEMultipart()
     message["to"] = config.TARGET_EMAIL
     message["subject"] = f"[FB URL]: {fb_url}"
@@ -185,6 +185,8 @@ def send_email_with_fb_url(service, fb_url: str, sender_info: dict):
 来自: {sender_info.get('name')} (@{sender_info.get('username')})
 群组: {sender_info.get('chat_title')}
 时间: {sender_info.get('date')}
+類型：{settings.get('type')}
+語言：{settings.get('language')}
 """.strip()
 
     message.attach(MIMEText(body, "plain", "utf-8"))

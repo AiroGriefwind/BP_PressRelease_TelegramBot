@@ -43,7 +43,7 @@ FB_URL_RECENT_SECONDS = 10 * 60  # “上一条URL”兜底：只取最近10分�
 
 # 可选设置项
 SETTINGS_OPTIONS = {
-    "type": ["全文不改", "只改標題"],
+    "type": ["全文不改", "只改標題", "全文改寫"],
     "priority": ["普通", "緊急"],
     "language": ["中文", "英文"],
     "drive_upload": ["普通", "Google Drive"],

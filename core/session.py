@@ -58,6 +58,7 @@ def _cleanup_session_userdata(application: Application, user_id: int, session_ke
         if not isinstance(ud, dict):
             return
         _safe_del(ud, f"temp_settings_{session_key}")
+        _safe_del(ud, f"temp_fb_settings_{session_key}")
         _safe_del(ud, f"logs_view_{session_key}")
     except Exception:
         pass

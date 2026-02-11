@@ -3,7 +3,18 @@ import json
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
 
 import config
-from features.fb_url import handle_text, on_fb_url_menu, on_fb_url_reset, on_fb_url_send
+from features.fb_url import (
+    handle_text,
+    on_fb_menu_settings_back,
+    on_fb_set_option,
+    on_fb_settings_cancel,
+    on_fb_settings_cancel_confirm,
+    on_fb_settings_confirm,
+    on_fb_url_menu,
+    on_fb_url_reset,
+    on_fb_url_send,
+    on_fb_url_settings,
+)
 from features.logs_ui import (
     on_log_detail,
     on_logs_back,
@@ -65,6 +76,18 @@ def main():
     app.add_handler(CallbackQueryHandler(on_fb_url_menu, pattern=r"^fb_url_menu\|"))
     app.add_handler(CallbackQueryHandler(on_fb_url_reset, pattern=r"^fb_url_reset\|"))
     app.add_handler(CallbackQueryHandler(on_fb_url_send, pattern=r"^fb_url_send\|"))
+    app.add_handler(CallbackQueryHandler(on_fb_url_settings, pattern=r"^fb_url_settings\|"))
+    app.add_handler(CallbackQueryHandler(on_fb_set_option, pattern=r"^fb_set_option\|"))
+    app.add_handler(CallbackQueryHandler(on_fb_settings_confirm, pattern=r"^fb_settings_confirm\|"))
+    app.add_handler(CallbackQueryHandler(on_fb_settings_cancel, pattern=r"^fb_settings_cancel\|"))
+    app.add_handler(
+        CallbackQueryHandler(
+            on_fb_settings_cancel_confirm, pattern=r"^fb_settings_cancel_confirm\|"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(on_fb_menu_settings_back, pattern=r"^fb_menu_settings_back\|")
+    )
     app.add_handler(CallbackQueryHandler(on_menu_logs, pattern=r"^menu_logs\|"))
     app.add_handler(CallbackQueryHandler(on_logs_days, pattern=r"^logs_days\|"))
     app.add_handler(CallbackQueryHandler(on_logs_mode, pattern=r"^logs_mode\|"))

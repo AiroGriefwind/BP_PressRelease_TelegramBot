@@ -12,7 +12,39 @@ from core.logging_ops import log_event
 from core.session import end_session, last_seen_fb_url, touch_session, user_sessions
 from core.time_utils import now_hk
 from integrations.gmail import get_gmail_service, send_email_with_fb_url
+from ui.keyboard import build_settings_keyboard
 from ui.messages import SESSION_EXPIRED_TEXT, try_edit_message_text_markup
+
+FB_SETTINGS_KEYS = ("type", "language")
+
+
+def _fb_settings_options() -> Dict[str, list]:
+    return {
+        key: config.SETTINGS_OPTIONS[key]
+        for key in FB_SETTINGS_KEYS
+        if key in config.SETTINGS_OPTIONS
+    }
+
+
+def _build_fb_url_confirm_text(fb_url: str, settings: dict, *, detected: bool = False) -> str:
+    prefix = "已检测到 FB URL：" if detected else "已收到 FB URL："
+    return (
+        f"{prefix}\n{fb_url}\n\n类型：{settings.get('type')}\n\n是否发送到 {config.TARGET_EMAIL}？"
+    )
+
+
+def _build_fb_url_confirm_markup(session_key: str) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"),
+            InlineKeyboardButton("✏️ 重新输入", callback_data=f"fb_url_reset|{session_key}"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ 设置", callback_data=f"fb_url_settings|{session_key}"),
+            InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"),
+        ],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
 
 def _extract_first_url(text: str) -> Optional[str]:
@@ -126,18 +158,11 @@ async def on_fb_url_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 已经有 URL：直接进入确认发送
     if fb_url:
-        buttons = [
-            [
-                InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"),
-                InlineKeyboardButton("✏️ 重新输入", callback_data=f"fb_url_reset|{session_key}"),
-            ],
-            [
-                InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"),
-            ],
-        ]
+        buttons = _build_fb_url_confirm_markup(session_key)
+        settings = sd.get("settings") or {}
         await query.edit_message_text(
-            f"当前 FB URL：\n{fb_url}\n\n是否发送到 {config.TARGET_EMAIL}？",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            _build_fb_url_confirm_text(fb_url, settings),
+            reply_markup=buttons,
             disable_web_page_preview=True,
         )
         return
@@ -222,8 +247,11 @@ async def on_fb_url_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     sender_info = _build_sender_info_from_message(query.message, fallback_user=query.from_user)
+    settings = sd.get("settings") or {}
     gmail_service = get_gmail_service()
-    success, err = await asyncio.to_thread(send_email_with_fb_url, gmail_service, fb_url, sender_info)
+    success, err = await asyncio.to_thread(
+        send_email_with_fb_url, gmail_service, fb_url, sender_info, settings
+    )
 
     if success:
         log_event(
@@ -315,28 +343,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ui_chat_id = sd.get("ui_chat_id")
     ui_message_id = sd.get("ui_message_id")
     if ui_chat_id is not None and ui_message_id is not None:
-        buttons = [
-            [
-                InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"),
-                InlineKeyboardButton("✏️ 重新输入", callback_data=f"fb_url_reset|{session_key}"),
-            ],
-            [
-                InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"),
-            ],
-        ]
+        buttons = _build_fb_url_confirm_markup(session_key)
         await try_edit_message_text_markup(
             context.application,
             int(ui_chat_id),
             int(ui_message_id),
-            f"已收到 FB URL：\n{norm}\n\n是否发送到 {config.TARGET_EMAIL}？",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            _build_fb_url_confirm_text(norm, sd.get("settings") or {}),
+            reply_markup=buttons,
             disable_web_page_preview=True,
         )
     else:
-        buttons = [[InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}")]]
+        buttons = _build_fb_url_confirm_markup(session_key)
         sent = await message.reply_text(
-            f"已收到 FB URL：\n{norm}\n\n是否发送到 {config.TARGET_EMAIL}？",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            _build_fb_url_confirm_text(norm, sd.get("settings") or {}),
+            reply_markup=buttons,
             disable_web_page_preview=True,
         )
         touch_session(
@@ -346,3 +366,245 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             message_id=sent.message_id,
         )
+
+
+async def on_fb_url_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    current_settings = (user_sessions.get(session_key) or {}).get("settings") or {}
+    context.user_data[f"temp_fb_settings_{session_key}"] = current_settings.copy()
+
+    log_event(
+        "fb_settings_open",
+        session_key=session_key,
+        session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+        update=update,
+    )
+
+    reply_markup = build_settings_keyboard(
+        session_key,
+        current_settings,
+        _fb_settings_options(),
+        set_option_prefix="fb_set_option",
+        confirm_prefix="fb_settings_confirm",
+        cancel_prefix="fb_settings_cancel",
+    )
+    await query.edit_message_text("请选择需要的选项：", reply_markup=reply_markup)
+
+
+async def on_fb_set_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, session_key, key, value = query.data.split("|")
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    temp_settings = context.user_data.get(f"temp_fb_settings_{session_key}") or {}
+    temp_settings[key] = value
+    context.user_data[f"temp_fb_settings_{session_key}"] = temp_settings
+
+    log_event(
+        "fb_settings_change",
+        session_key=session_key,
+        session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+        update=update,
+        extra={"key": key, "value": value},
+    )
+
+    reply_markup = build_settings_keyboard(
+        session_key,
+        temp_settings,
+        _fb_settings_options(),
+        set_option_prefix="fb_set_option",
+        confirm_prefix="fb_settings_confirm",
+        cancel_prefix="fb_settings_cancel",
+    )
+    await query.edit_message_text("请选择需要的选项：", reply_markup=reply_markup)
+
+
+async def on_fb_settings_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    user_sessions[session_key]["settings"] = context.user_data[
+        f"temp_fb_settings_{session_key}"
+    ].copy()
+    del context.user_data[f"temp_fb_settings_{session_key}"]
+
+    log_event(
+        "fb_settings_confirm",
+        session_key=session_key,
+        session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+        update=update,
+        extra={"settings": user_sessions[session_key].get("settings")},
+    )
+
+    sd = user_sessions.get(session_key) or {}
+    fb_url = sd.get("fb_url")
+    if not fb_url:
+        await query.edit_message_text("⚠️ 尚未获取到 FB URL。请先输入链接。")
+        return
+
+    await query.edit_message_text(
+        _build_fb_url_confirm_text(fb_url, sd.get("settings") or {}),
+        reply_markup=_build_fb_url_confirm_markup(session_key),
+        disable_web_page_preview=True,
+    )
+
+
+async def on_fb_settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    original_settings = (user_sessions.get(session_key) or {}).get("settings") or {}
+    temp_settings = context.user_data.get(f"temp_fb_settings_{session_key}") or {}
+
+    if original_settings == temp_settings:
+        del context.user_data[f"temp_fb_settings_{session_key}"]
+        sd = user_sessions.get(session_key) or {}
+        fb_url = sd.get("fb_url")
+        if not fb_url:
+            await query.edit_message_text("⚠️ 尚未获取到 FB URL。请先输入链接。")
+            return
+        await query.edit_message_text(
+            _build_fb_url_confirm_text(fb_url, sd.get("settings") or {}),
+            reply_markup=_build_fb_url_confirm_markup(session_key),
+            disable_web_page_preview=True,
+        )
+        return
+
+    log_event(
+        "fb_settings_cancel_prompt",
+        session_key=session_key,
+        session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+        update=update,
+    )
+    buttons = [
+        [
+            InlineKeyboardButton(
+                "是，放弃更改", callback_data=f"fb_settings_cancel_confirm|{session_key}"
+            ),
+            InlineKeyboardButton(
+                "否，继续编辑", callback_data=f"fb_menu_settings_back|{session_key}"
+            ),
+        ]
+    ]
+    await query.edit_message_text("设置已更改，是否放弃并返回？", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def on_fb_settings_cancel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    del context.user_data[f"temp_fb_settings_{session_key}"]
+
+    log_event(
+        "fb_settings_cancel_confirm",
+        session_key=session_key,
+        session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+        update=update,
+    )
+
+    sd = user_sessions.get(session_key) or {}
+    fb_url = sd.get("fb_url")
+    if not fb_url:
+        await query.edit_message_text("⚠️ 尚未获取到 FB URL。请先输入链接。")
+        return
+
+    await query.edit_message_text(
+        _build_fb_url_confirm_text(fb_url, sd.get("settings") or {}),
+        reply_markup=_build_fb_url_confirm_markup(session_key),
+        disable_web_page_preview=True,
+    )
+
+
+async def on_fb_menu_settings_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    temp_settings = context.user_data.get(f"temp_fb_settings_{session_key}") or {}
+    reply_markup = build_settings_keyboard(
+        session_key,
+        temp_settings,
+        _fb_settings_options(),
+        set_option_prefix="fb_set_option",
+        confirm_prefix="fb_settings_confirm",
+        cancel_prefix="fb_settings_cancel",
+    )
+    await query.edit_message_text("请选择需要的选项：", reply_markup=reply_markup)
