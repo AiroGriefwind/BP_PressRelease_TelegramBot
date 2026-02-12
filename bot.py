@@ -26,6 +26,7 @@ from features.logs_ui import (
     on_logs_refresh,
     on_menu_logs,
 )
+from features.help_ui import on_help_back_list, on_help_back_main, on_help_detail, on_menu_help
 from features.pr_processing import (
     handle_file,
     handle_mention,
@@ -93,6 +94,10 @@ def main():
         CallbackQueryHandler(on_fb_menu_settings_back, pattern=r"^fb_menu_settings_back\|")
     )
     app.add_handler(CallbackQueryHandler(on_menu_logs, pattern=r"^menu_logs\|"))
+    app.add_handler(CallbackQueryHandler(on_menu_help, pattern=r"^menu_help\|"))
+    app.add_handler(CallbackQueryHandler(on_help_detail, pattern=r"^help_detail\|"))
+    app.add_handler(CallbackQueryHandler(on_help_back_list, pattern=r"^help_back_list\|"))
+    app.add_handler(CallbackQueryHandler(on_help_back_main, pattern=r"^help_back_main\|"))
     app.add_handler(CallbackQueryHandler(on_logs_days, pattern=r"^logs_days\|"))
     app.add_handler(CallbackQueryHandler(on_logs_mode, pattern=r"^logs_mode\|"))
     app.add_handler(CallbackQueryHandler(on_logs_keyword, pattern=r"^logs_keyword\|"))

@@ -87,6 +87,9 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
         [
             InlineKeyboardButton("⚙️ 設定", callback_data=f"menu_settings|{session_key}"),
             InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}"),
+            InlineKeyboardButton("❓ 幫助", callback_data=f"menu_help|{session_key}"),
+        ],
+        [
             InlineKeyboardButton("🔄 刷新", callback_data=f"main_refresh|{session_key}"),
             InlineKeyboardButton("🛑 結束會話", callback_data=f"end_session|{session_key}"),
         ],
