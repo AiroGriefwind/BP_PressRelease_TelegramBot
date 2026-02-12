@@ -35,7 +35,7 @@ from ui.messages import (
 )
 
 ADD_MSG_IDLE_SECONDS = 5
-UI_EXPIRED_TEXT = "新 UI 已生成，请在最新消息操作。"
+UI_EXPIRED_TEXT = "新 UI 已生成，請在最新訊息操作。"
 
 
 def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -43,7 +43,7 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
     settings = session_data.get("settings") or config.DEFAULT_SETTINGS.copy()
 
     file_names = [name for _, name in files]
-    attach_list = "\n".join(file_names) if file_names else "暂无附件"
+    attach_list = "\n".join(file_names) if file_names else "暫無附件"
     total_bytes = _total_size_bytes(files)
     total_size_text = _format_size(total_bytes) if files else ""
     has_non_photo = _has_non_photo(file_names)
@@ -55,7 +55,7 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
         f"類型：{settings['type']}\n"
         f"優先度：{settings['priority']}\n"
         f"語言：{settings['language']}\n"
-        f"发送方式：{settings.get('drive_upload', '普通')}"
+        f"傳送方式：{settings.get('drive_upload', '普通')}"
     )
     fb_url_line = ""
     try:
@@ -67,28 +67,28 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
     remind_line = ""
     if not has_non_photo:
         if total_size_text:
-            remind_line = f"\n\n⚠️ 尚未添加公关稿本体（非图片附件）。当前总大小：{total_size_text}"
+            remind_line = f"\n\n⚠️ 尚未添加公關稿本體（非圖片附件）。當前總大小：{total_size_text}"
         else:
-            remind_line = "\n\n⚠️ 尚未添加公关稿本体（非图片附件）。"
+            remind_line = "\n\n⚠️ 尚未添加公關稿本體（非圖片附件）。"
     size_line = ""
     if drive_mode and files:
         size_line = (
-            f"\n\n总大小：{total_size_text}\n已超过 {config.DRIVE_AUTO_SIZE_MB}MB，将改用 Drive 共享链接发送。"
+            f"\n\n總大小：{total_size_text}\n已超過 {config.DRIVE_AUTO_SIZE_MB}MB，將改用 Drive 共享連結傳送。"
         )
 
     ui_msg = f"附件列表：\n{attach_list}{remind_line}{size_line}\n\n---\n\n{settings_text}{fb_url_line}"
 
     buttons = [
         [
-            InlineKeyboardButton("确认", callback_data=f"confirm_send|{session_key}"),
+            InlineKeyboardButton("確認", callback_data=f"confirm_send|{session_key}"),
             InlineKeyboardButton(config.FB_URL_BUTTON_TEXT, callback_data=f"fb_url_menu|{session_key}"),
-            InlineKeyboardButton("删除", callback_data=f"menu_delete_mode|{session_key}"),
+            InlineKeyboardButton("刪除", callback_data=f"menu_delete_mode|{session_key}"),
         ],
         [
-            InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}"),
+            InlineKeyboardButton("⚙️ 設定", callback_data=f"menu_settings|{session_key}"),
             InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}"),
             InlineKeyboardButton("🔄 刷新", callback_data=f"main_refresh|{session_key}"),
-            InlineKeyboardButton("🛑 结束会话", callback_data=f"end_session|{session_key}"),
+            InlineKeyboardButton("🛑 結束會話", callback_data=f"end_session|{session_key}"),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(buttons)
@@ -110,7 +110,7 @@ async def _on_add_msg_idle(context: ContextTypes.DEFAULT_TYPE):
     if session_data.get("add_msg_id") != message_id:
         return
 
-    text = f"✅ 已完成所有附件加载（{count}个）"
+    text = f"✅ 已完成所有附件載入（{count}個）"
     await try_edit_message_text(
         context.application,
         chat_id=int(chat_id),
@@ -255,7 +255,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             should_update = True
 
         if should_update:
-            text = f"已添加: {file_name}\n当前累计: {session_data['add_msg_count']} 个"
+            text = f"已添加: {file_name}\n當前累計: {session_data['add_msg_count']} 個"
             if session_data.get("add_msg_id"):
                 await try_edit_message_text(
                     context.application,
@@ -360,7 +360,7 @@ async def show_settings_menu(
 ):
     query = update.callback_query
     reply_markup = build_settings_keyboard(session_key, settings)
-    await query.edit_message_text("请选择需要的选项：", reply_markup=reply_markup)
+    await query.edit_message_text("請選擇需要的選項：", reply_markup=reply_markup)
 
 
 async def on_set_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -461,15 +461,15 @@ async def on_settings_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
         buttons = [
             [
                 InlineKeyboardButton(
-                    "是，放弃更改", callback_data=f"settings_cancel_confirm|{session_key}"
+                    "是，放棄更改", callback_data=f"settings_cancel_confirm|{session_key}"
                 ),
                 InlineKeyboardButton(
-                    "否，继续编辑", callback_data=f"menu_settings_back|{session_key}"
+                    "否，繼續編輯", callback_data=f"menu_settings_back|{session_key}"
                 ),
             ]
         ]
         await query.edit_message_text(
-            "设置已更改，是否放弃并返回？", reply_markup=InlineKeyboardMarkup(buttons)
+            "設定已更改，是否放棄並返回？", reply_markup=InlineKeyboardMarkup(buttons)
         )
 
 
@@ -722,13 +722,13 @@ async def on_menu_delete_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard.append(
         [
-            InlineKeyboardButton("🗑️ 全部删除", callback_data=f"ask_del_all|{session_key}"),
+            InlineKeyboardButton("🗑️ 全部刪除", callback_data=f"ask_del_all|{session_key}"),
             InlineKeyboardButton("✅ 完成", callback_data=f"back_to_main|{session_key}"),
         ]
     )
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    msg_text = "点击红色 X 删除特定附件：" if files else "暂无附件可删除。"
+    msg_text = "點擊紅色 X 刪除特定附件：" if files else "暫無附件可刪除。"
 
     await try_edit_message_text_markup(
         context.application,
@@ -763,7 +763,7 @@ async def on_ask_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.application,
             query.message.chat.id,
             query.message.message_id,
-            "⚠️ 文件不存在或已被删除。",
+            "⚠️ 檔案不存在或已被刪除。",
             reply_markup=None,
         )
         return
@@ -772,7 +772,7 @@ async def on_ask_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = [
         [
-            InlineKeyboardButton("是，删除", callback_data=f"do_del_one|{session_key}|{index}"),
+            InlineKeyboardButton("是，刪除", callback_data=f"do_del_one|{session_key}|{index}"),
             InlineKeyboardButton("否，返回", callback_data=f"menu_delete_mode|{session_key}"),
         ]
     ]
@@ -780,14 +780,14 @@ async def on_ask_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.application,
         query.message.chat.id,
         query.message.message_id,
-        f"确定要删除 {target_file_name} 吗？",
+        f"確定要刪除 {target_file_name} 嗎？",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
 async def on_do_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("已删除")
+    await query.answer("已刪除")
     _, session_key, index_str = query.data.split("|")
 
     touch_session(
@@ -862,16 +862,16 @@ async def on_ask_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if not files:
-        await query.answer("列表已经是空的了", show_alert=True)
+        await query.answer("列表已經是空的了", show_alert=True)
         return
 
     buttons = [
         [
-            InlineKeyboardButton("⚠️ 确认全部删除", callback_data=f"do_del_all|{session_key}"),
+            InlineKeyboardButton("⚠️ 確認全部刪除", callback_data=f"do_del_all|{session_key}"),
             InlineKeyboardButton("取消", callback_data=f"menu_delete_mode|{session_key}"),
         ]
     ]
-    await query.edit_message_text("⚠️ 确定要清空所有附件吗？此操作不可逆。", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text("⚠️ 確定要清空所有附件嗎？此操作不可逆。", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def on_do_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -890,7 +890,7 @@ async def on_do_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await end_session(
         application=context.application,
         session_key=session_key,
-        reason_text="🗑️ 已全部删除。会话结束。",
+        reason_text="🗑️ 已全部刪除。會話結束。",
         reason_code="delete_all",
         user_id=query.from_user.id,
         chat_id=query.message.chat.id,
@@ -927,7 +927,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session_data = user_sessions.get(session_key)
     if not session_data or not session_data["files"]:
-        await query.edit_message_text("⚠️ 没有附件，请先上传文件或图片。")
+        await query.edit_message_text("⚠️ 沒有附件，請先上傳檔案或圖片。")
         return
 
     sending_snapshot = list(session_data.get("files") or [])
@@ -949,13 +949,13 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     done_units = 0
 
     progress_active = True
-    progress_state = {"percent": 0, "status": "准备附件", "dirty": True}
+    progress_state = {"percent": 0, "status": "準備附件", "dirty": True}
 
     async def _progress_loop():
         last_text = ""
         while progress_active:
             if progress_state["dirty"]:
-                text = f"进度: {render_progress_bar(progress_state['percent'])}\n当前步骤：{progress_state['status']}"
+                text = f"進度: {render_progress_bar(progress_state['percent'])}\n當前步驟：{progress_state['status']}"
                 if text != last_text:
                     await try_edit_query_message(query, text)
                     last_text = text
@@ -976,7 +976,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         progress_state["status"] = status
         progress_state["dirty"] = True
 
-    _progress_update("准备附件", 0)
+    _progress_update("準備附件", 0)
 
     sender_info = {
         "name": (message.reply_to_message.from_user.first_name or "")
@@ -1016,7 +1016,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     else:
         _progress_update("打包附件", 1)
-        _progress_update("发送邮件", 1)
+        _progress_update("傳送郵件", 1)
         success, err = await asyncio.to_thread(
             send_email_with_attachments,
             gmail_service,
@@ -1030,9 +1030,9 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if success:
         extra_link = ""
         if drive_mode and drive_folder_link:
-            extra_link = f"\n\nDrive 文件夹：\n{drive_folder_link}"
+            extra_link = f"\n\nDrive 資料夾：\n{drive_folder_link}"
         done_units = total_units
-        _progress_update("发送完成", 0)
+        _progress_update("傳送完成", 0)
         progress_active = False
         try:
             progress_task.cancel()
@@ -1049,14 +1049,14 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session_data.get("files"):
             await try_edit_query_message(
                 query,
-                f"✅ 本批已发送到 {config.TARGET_EMAIL}\n检测到新增附件，已保留在列表中，请继续发送。{extra_link}",
+                f"✅ 本批已傳送到 {config.TARGET_EMAIL}\n偵測到新增附件，已保留在列表中，請繼續傳送。{extra_link}",
             )
             await handle_mention(update, context)
         else:
             await end_session(
                 application=context.application,
                 session_key=session_key,
-                reason_text=f"✅ 文件已发送到 {config.TARGET_EMAIL}\n会话结束。{extra_link}",
+                reason_text=f"✅ 檔案已傳送到 {config.TARGET_EMAIL}\n會話結束。{extra_link}",
                 reason_code="send_success",
                 user_id=query.from_user.id,
                 chat_id=query.message.chat.id,
@@ -1068,7 +1068,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             progress_task.cancel()
         except Exception:
             pass
-        await query.edit_message_text("❌ 发送失败,请重试")
+        await query.edit_message_text("❌ 傳送失敗，請重試")
         if sending_snapshot:
             session_data["files"] = sending_snapshot + (session_data.get("files") or [])
         session_data["sending_snapshot"] = []
@@ -1090,7 +1090,7 @@ async def on_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await end_session(
         application=context.application,
         session_key=session_key,
-        reason_text="🛑 会话已结束。",
+        reason_text="🛑 會話已結束。",
         reason_code="manual_end",
         user_id=query.from_user.id,
         chat_id=query.message.chat.id,

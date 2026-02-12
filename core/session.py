@@ -174,7 +174,7 @@ async def _on_session_timeout(context: ContextTypes.DEFAULT_TYPE):
     await end_session(
         application=context.application,
         session_key=session_key,
-        reason_text="⏱️ 10分钟无操作，会话自动结束。",
+        reason_text="⏱️ 10分鐘無操作，會話自動結束。",
         reason_code="timeout",
         user_id=data.get("user_id"),
         chat_id=data.get("chat_id"),

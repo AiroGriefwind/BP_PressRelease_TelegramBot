@@ -4,7 +4,7 @@ from telegram import InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import Application
 
-SESSION_EXPIRED_TEXT = "⚠️ 会话已结束，请重新@我开始。"
+SESSION_EXPIRED_TEXT = "⚠️ 會話已結束，請重新@我開始。"
 
 
 async def try_edit_message_text(

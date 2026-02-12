@@ -164,7 +164,7 @@ def upload_files_to_drive(
 
     try:
         if progress_cb:
-            progress_cb("查找/创建 Drive 文件夹", 0)
+            progress_cb("查找/建立 Drive 資料夾", 0)
         base_parent = folder_id or "root"
         root_id = ensure_drive_folder(service, root_folder_name, base_parent)
         year_id = ensure_drive_folder(service, year, root_id)
@@ -173,7 +173,7 @@ def upload_files_to_drive(
 
         # 设文件夹为任何人可读
         if progress_cb:
-            progress_cb("设置 Drive 文件夹权限", 0)
+            progress_cb("設定 Drive 資料夾權限", 0)
         _execute_with_retry(
             lambda: service.permissions().create(
                 fileId=title_id,
@@ -181,7 +181,7 @@ def upload_files_to_drive(
             ).execute()
         )
         if progress_cb:
-            progress_cb("Drive 文件夹已就绪", 2)
+            progress_cb("Drive 資料夾已就緒", 2)
     except Exception as e:
         return False, _format_gapi_error(e), None
 
@@ -191,7 +191,7 @@ def upload_files_to_drive(
             metadata = {"name": file_name, "parents": [title_id]}
             media = MediaFileUpload(file_path, resumable=True)
             if progress_cb:
-                progress_cb(f'正在上传“{file_name}”....', 0)
+                progress_cb(f'正在上傳“{file_name}”....', 0)
             created = _execute_with_retry(
                 lambda: service.files().create(
                     body=metadata,
@@ -201,9 +201,9 @@ def upload_files_to_drive(
             )
             file_id = created.get("id")
             if not file_id:
-                return False, f"上传失败：未返回 fileId ({file_name})", None
+                return False, f"上傳失敗：未返回 fileId ({file_name})", None
             if progress_cb:
-                progress_cb(f'上传完成，设置文件权限“{file_name}”', 1)
+                progress_cb(f'上傳完成，設定檔案權限“{file_name}”', 1)
             # 设为任何人可读（双保险）
             _execute_with_retry(
                 lambda: service.permissions().create(
@@ -212,7 +212,7 @@ def upload_files_to_drive(
                 ).execute()
             )
             if progress_cb:
-                progress_cb(f'文件权限已设置“{file_name}”', 1)
+                progress_cb(f'檔案權限已設定“{file_name}”', 1)
             link = created.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
             items.append({"name": file_name, "id": file_id, "link": link})
         except Exception as e:

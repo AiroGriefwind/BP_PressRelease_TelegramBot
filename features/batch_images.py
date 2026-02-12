@@ -23,7 +23,7 @@ async def send_drive_mode(
     progress_update,
 ):
     _progress_update = progress_update
-    _progress_update("准备上传到 Drive", 0)
+    _progress_update("準備上傳到 Drive", 0)
     drive_service = get_drive_service()
     dt = message_date.astimezone(now_hk().tzinfo)
     log_event(
@@ -44,7 +44,7 @@ async def send_drive_mode(
         progress_cb=_progress_update,
     )
     if not ok:
-        await query.edit_message_text(f"❌ Drive 上传失败，请重试。\n原因：{err}")
+        await query.edit_message_text(f"❌ Drive 上傳失敗，請重試。\n原因：{err}")
         log_event(
             "drive_upload_failed",
             session_key=session_key,
@@ -64,8 +64,8 @@ async def send_drive_mode(
             "folder_title": (file_items or {}).get("title"),
         },
     )
-    _progress_update("生成 Drive 链接 JSON", 0)
-    _progress_update("发送邮件", 1)
+    _progress_update("生成 Drive 連結 JSON", 0)
+    _progress_update("傳送郵件", 1)
     non_photo_files = [
         (fp, fn) for fp, fn in zip(file_paths, file_names) if not _is_photo_name(fn)
     ]

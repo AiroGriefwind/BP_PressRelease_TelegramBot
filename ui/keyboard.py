@@ -27,7 +27,7 @@ def build_settings_keyboard(
 
     keyboard.append(
         [
-            InlineKeyboardButton("确认", callback_data=f"{confirm_prefix}|{session_key}"),
+            InlineKeyboardButton("確認", callback_data=f"{confirm_prefix}|{session_key}"),
             InlineKeyboardButton("取消", callback_data=f"{cancel_prefix}|{session_key}"),
         ]
     )

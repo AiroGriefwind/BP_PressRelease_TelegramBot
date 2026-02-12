@@ -95,13 +95,13 @@ def render_logs_menu(
 
     text_lines = [
         f"🧾 Logs（最近{days}天 / {mode}）",
-        f"成功: {succ}  失败: {fail}  总计: {total}",
-        f"页: {page + 1} / {max_page + 1}",
-        f"关键词: {keyword or '-'}",
-        f"最后刷新: {last_refresh}  缓存有效期: {ttl_minutes} 分钟",
+        f"成功: {succ}  失敗: {fail}  總計: {total}",
+        f"頁: {page + 1} / {max_page + 1}",
+        f"關鍵字: {keyword or '-'}",
+        f"最後刷新: {last_refresh}  快取有效期: {ttl_minutes} 分鐘",
     ]
     if total == 0:
-        text_lines.append("暂无记录，可点击刷新。")
+        text_lines.append("暫無記錄，可點擊刷新。")
     text = "\n".join(text_lines)
 
     keyboard = []
@@ -125,10 +125,10 @@ def render_logs_menu(
         [
             InlineKeyboardButton("全部", callback_data=f"logs_mode|{session_key}|ALL"),
             InlineKeyboardButton("成功", callback_data=f"logs_mode|{session_key}|SUCCESS"),
-            InlineKeyboardButton("失败", callback_data=f"logs_mode|{session_key}|ERROR"),
+            InlineKeyboardButton("失敗", callback_data=f"logs_mode|{session_key}|ERROR"),
         ]
     )
-    keyword_row = [InlineKeyboardButton("🔍 关键词", callback_data=f"logs_keyword|{session_key}")]
+    keyword_row = [InlineKeyboardButton("🔍 關鍵字", callback_data=f"logs_keyword|{session_key}")]
     if keyword:
         keyword_row.append(
             InlineKeyboardButton("❌ 清除", callback_data=f"logs_keyword_clear|{session_key}")
@@ -136,8 +136,8 @@ def render_logs_menu(
     keyboard.append(keyword_row)
     keyboard.append(
         [
-            InlineKeyboardButton("⬅️ 上一页", callback_data=f"logs_page|{session_key}|-1"),
-            InlineKeyboardButton("➡️ 下一页", callback_data=f"logs_page|{session_key}|1"),
+            InlineKeyboardButton("⬅️ 上一頁", callback_data=f"logs_page|{session_key}|-1"),
+            InlineKeyboardButton("➡️ 下一頁", callback_data=f"logs_page|{session_key}|1"),
         ]
     )
     keyboard.append(
@@ -204,7 +204,7 @@ async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auto_refreshed = False
     if not logs or cache_info.get("stale"):
         try:
-            await query.answer("自动刷新中...", cache_time=0)
+            await query.answer("自動刷新中...", cache_time=0)
         except BadRequest:
             pass
         try:
@@ -387,7 +387,7 @@ async def on_logs_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         fetched = None
         try:
-            await query.answer(f"拉取失败: {e}", show_alert=True)
+            await query.answer(f"拉取失敗: {e}", show_alert=True)
         except BadRequest:
             pass
 
@@ -432,7 +432,7 @@ async def on_log_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logs = read_logs_cache()
     x = next((r for r in logs if str(r.get("id")) == str(log_id)), None)
     if not x:
-        await query.edit_message_text("⚠️ 记录不存在或已过期。")
+        await query.edit_message_text("⚠️ 記錄不存在或已過期。")
         return
 
     st = (x.get("status") or "").upper()
@@ -443,11 +443,11 @@ async def on_log_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = x.get("title", "")
 
     text = (
-        "🧾 Log 详情\n"
-        f"时间: {ts}\n"
-        f"状态: {st}\n"
-        f"错误码: {code or '-'} {f'({err})' if err else ''}\n"
-        f"标题: {title}\n\n"
+        "🧾 Log 詳情\n"
+        f"時間: {ts}\n"
+        f"狀態: {st}\n"
+        f"錯誤碼: {code or '-'} {f'({err})' if err else ''}\n"
+        f"標題: {title}\n\n"
         f"Subject:\n{subject}"
     )
     keyboard = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"menu_logs|{session_key}")]]
@@ -518,7 +518,7 @@ async def on_logs_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"menu_logs|{session_key}")]]
     await query.edit_message_text(
-        "请输入关键词（匹配标题/Subject），发送一条文本即可。发送 '-' 可清空关键词。",
+        "請輸入關鍵字（匹配標題/Subject），傳送一則文字即可。傳送 '-' 可清空關鍵字。",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 

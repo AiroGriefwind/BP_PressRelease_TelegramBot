@@ -27,21 +27,21 @@ def _fb_settings_options() -> Dict[str, list]:
 
 
 def _build_fb_url_confirm_text(fb_url: str, settings: dict, *, detected: bool = False) -> str:
-    prefix = "已检测到 FB URL：" if detected else "已收到 FB URL："
+    prefix = "已偵測到 FB URL：" if detected else "已收到 FB URL："
     return (
-        f"{prefix}\n{fb_url}\n\n类型：{settings.get('type')}\n\n是否发送到 {config.TARGET_EMAIL}？"
+        f"{prefix}\n{fb_url}\n\n類型：{settings.get('type')}\n\n是否傳送到 {config.TARGET_EMAIL}？"
     )
 
 
 def _build_fb_url_confirm_markup(session_key: str) -> InlineKeyboardMarkup:
     buttons = [
         [
-            InlineKeyboardButton("✅ 发送 FB URL", callback_data=f"fb_url_send|{session_key}"),
-            InlineKeyboardButton("✏️ 重新输入", callback_data=f"fb_url_reset|{session_key}"),
+            InlineKeyboardButton("✅ 傳送 FB URL", callback_data=f"fb_url_send|{session_key}"),
+            InlineKeyboardButton("✏️ 重新輸入", callback_data=f"fb_url_reset|{session_key}"),
         ],
         [
-            InlineKeyboardButton("⚙️ 设置", callback_data=f"fb_url_settings|{session_key}"),
-            InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}"),
+            InlineKeyboardButton("⚙️ 設定", callback_data=f"fb_url_settings|{session_key}"),
+            InlineKeyboardButton("⬅️ 返回主選單", callback_data=f"back_to_main|{session_key}"),
         ],
     ]
     return InlineKeyboardMarkup(buttons)
@@ -178,9 +178,9 @@ async def on_fb_url_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update=update,
     )
 
-    buttons = [[InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}")]]
+    buttons = [[InlineKeyboardButton("⬅️ 返回主選單", callback_data=f"back_to_main|{session_key}")]]
     await query.edit_message_text(
-        "请发送 FB 分享链接（URL）给我。",
+        "請傳送 FB 分享連結（URL）給我。",
         reply_markup=InlineKeyboardMarkup(buttons),
         disable_web_page_preview=True,
     )
@@ -215,9 +215,9 @@ async def on_fb_url_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update=update,
     )
 
-    buttons = [[InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}")]]
+    buttons = [[InlineKeyboardButton("⬅️ 返回主選單", callback_data=f"back_to_main|{session_key}")]]
     await query.edit_message_text(
-        "请重新发送 FB 分享链接（URL）给我。",
+        "請重新傳送 FB 分享連結（URL）給我。",
         reply_markup=InlineKeyboardMarkup(buttons),
         disable_web_page_preview=True,
     )
@@ -243,7 +243,7 @@ async def on_fb_url_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sd = user_sessions.get(session_key) or {}
     fb_url = sd.get("fb_url")
     if not fb_url:
-        await query.edit_message_text("⚠️ 尚未获取到 FB URL。请先输入链接。")
+        await query.edit_message_text("⚠️ 尚未取得 FB URL。請先輸入連結。")
         return
 
     sender_info = _build_sender_info_from_message(query.message, fallback_user=query.from_user)
@@ -264,7 +264,7 @@ async def on_fb_url_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await end_session(
             application=context.application,
             session_key=session_key,
-            reason_text=f"✅ FB URL 已发送到 {config.TARGET_EMAIL}\n会话结束。",
+            reason_text=f"✅ FB URL 已傳送到 {config.TARGET_EMAIL}\n會話結束。",
             reason_code="fb_url_send_success",
             user_id=query.from_user.id,
             chat_id=query.message.chat.id,
@@ -278,9 +278,9 @@ async def on_fb_url_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update=update,
             extra={"error": err},
         )
-        buttons = [[InlineKeyboardButton("⬅️ 返回主菜单", callback_data=f"back_to_main|{session_key}")]]
+        buttons = [[InlineKeyboardButton("⬅️ 返回主選單", callback_data=f"back_to_main|{session_key}")]]
         await query.edit_message_text(
-            "❌ FB URL 发送失败，请稍后重试。",
+            "❌ FB URL 傳送失敗，請稍後重試。",
             reply_markup=InlineKeyboardMarkup(buttons),
             disable_web_page_preview=True,
         )
@@ -320,12 +320,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         raw_url = _extract_first_url(message.text or "")
         if not raw_url:
-            await message.reply_text("⚠️ 没检测到 URL。请直接发送一条包含 Facebook 分享链接的消息。")
+            await message.reply_text("⚠️ 未偵測到 URL。請直接傳送一則包含 Facebook 分享連結的訊息。")
             return
 
         norm = _normalize_fb_url(raw_url)
         if not _looks_like_facebook_url(norm):
-            await message.reply_text("⚠️ 目前只支持 Facebook 相关链接。请重新发送 FB 分享链接。")
+            await message.reply_text("⚠️ 目前只支援 Facebook 相關連結。請重新傳送 FB 分享連結。")
             return
 
         sd["fb_url"] = norm
@@ -452,7 +452,7 @@ async def on_fb_url_settings(update: Update, context: ContextTypes.DEFAULT_TYPE)
         confirm_prefix="fb_settings_confirm",
         cancel_prefix="fb_settings_cancel",
     )
-    await query.edit_message_text("请选择需要的选项：", reply_markup=reply_markup)
+    await query.edit_message_text("請選擇需要的選項：", reply_markup=reply_markup)
 
 
 async def on_fb_set_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -492,7 +492,7 @@ async def on_fb_set_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
         confirm_prefix="fb_settings_confirm",
         cancel_prefix="fb_settings_cancel",
     )
-    await query.edit_message_text("请选择需要的选项：", reply_markup=reply_markup)
+    await query.edit_message_text("請選擇需要的選項：", reply_markup=reply_markup)
 
 
 async def on_fb_settings_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -528,7 +528,7 @@ async def on_fb_settings_confirm(update: Update, context: ContextTypes.DEFAULT_T
     sd = user_sessions.get(session_key) or {}
     fb_url = sd.get("fb_url")
     if not fb_url:
-        await query.edit_message_text("⚠️ 尚未获取到 FB URL。请先输入链接。")
+        await query.edit_message_text("⚠️ 尚未取得 FB URL。請先輸入連結。")
         return
 
     await query.edit_message_text(
@@ -563,7 +563,7 @@ async def on_fb_settings_cancel(update: Update, context: ContextTypes.DEFAULT_TY
         sd = user_sessions.get(session_key) or {}
         fb_url = sd.get("fb_url")
         if not fb_url:
-            await query.edit_message_text("⚠️ 尚未获取到 FB URL。请先输入链接。")
+            await query.edit_message_text("⚠️ 尚未取得 FB URL。請先輸入連結。")
             return
         await query.edit_message_text(
             _build_fb_url_confirm_text(fb_url, sd.get("settings") or {}),
@@ -581,14 +581,14 @@ async def on_fb_settings_cancel(update: Update, context: ContextTypes.DEFAULT_TY
     buttons = [
         [
             InlineKeyboardButton(
-                "是，放弃更改", callback_data=f"fb_settings_cancel_confirm|{session_key}"
+                "是，放棄更改", callback_data=f"fb_settings_cancel_confirm|{session_key}"
             ),
             InlineKeyboardButton(
-                "否，继续编辑", callback_data=f"fb_menu_settings_back|{session_key}"
+                "否，繼續編輯", callback_data=f"fb_menu_settings_back|{session_key}"
             ),
         ]
     ]
-    await query.edit_message_text("设置已更改，是否放弃并返回？", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text("設定已更改，是否放棄並返回？", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def on_fb_settings_cancel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -620,7 +620,7 @@ async def on_fb_settings_cancel_confirm(update: Update, context: ContextTypes.DE
     sd = user_sessions.get(session_key) or {}
     fb_url = sd.get("fb_url")
     if not fb_url:
-        await query.edit_message_text("⚠️ 尚未获取到 FB URL。请先输入链接。")
+        await query.edit_message_text("⚠️ 尚未取得 FB URL。請先輸入連結。")
         return
 
     await query.edit_message_text(
@@ -656,4 +656,4 @@ async def on_fb_menu_settings_back(update: Update, context: ContextTypes.DEFAULT
         confirm_prefix="fb_settings_confirm",
         cancel_prefix="fb_settings_cancel",
     )
-    await query.edit_message_text("请选择需要的选项：", reply_markup=reply_markup)
+    await query.edit_message_text("請選擇需要的選項：", reply_markup=reply_markup)
