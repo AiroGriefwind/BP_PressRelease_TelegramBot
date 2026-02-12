@@ -95,12 +95,14 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
     return ui_msg, reply_markup
 
 
-async def _on_add_msg_idle(context: ContextTypes.DEFAULT_TYPE):
-    data = getattr(context.job, "data", None) or {}
-    session_key = data.get("session_key")
-    chat_id = data.get("chat_id")
-    message_id = data.get("message_id")
-    count = data.get("count")
+async def _complete_add_msg(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    session_key: str,
+    chat_id: int,
+    message_id: int,
+    count: int,
+):
     if not session_key or chat_id is None or message_id is None:
         return
 
@@ -119,6 +121,7 @@ async def _on_add_msg_idle(context: ContextTypes.DEFAULT_TYPE):
     )
     session_data["add_msg_done"] = True
     session_data["add_msg_done_job"] = None
+    session_data["add_msg_done_task"] = None
 
     ui_chat_id = session_data.get("ui_chat_id")
     ui_message_id = session_data.get("ui_message_id")
@@ -143,6 +146,40 @@ async def _on_add_msg_idle(context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def _on_add_msg_idle(context: ContextTypes.DEFAULT_TYPE):
+    data = getattr(context.job, "data", None) or {}
+    await _complete_add_msg(
+        context,
+        session_key=data.get("session_key"),
+        chat_id=data.get("chat_id"),
+        message_id=data.get("message_id"),
+        count=data.get("count"),
+    )
+
+
+async def _add_msg_idle_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    session_key: str,
+    chat_id: int,
+    message_id: int,
+    count: int,
+):
+    try:
+        await asyncio.sleep(ADD_MSG_IDLE_SECONDS)
+        await _complete_add_msg(
+            context,
+            session_key=session_key,
+            chat_id=chat_id,
+            message_id=message_id,
+            count=count,
+        )
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+
+
 def _schedule_add_msg_idle(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -163,21 +200,46 @@ def _schedule_add_msg_idle(
             pass
         session_data["add_msg_done_job"] = None
 
+    task = session_data.get("add_msg_done_task")
+    if task is not None:
+        try:
+            task.cancel()
+        except Exception:
+            pass
+        session_data["add_msg_done_task"] = None
+
+    job_queue = getattr(context.application, "job_queue", None)
+    if job_queue is not None:
+        try:
+            job = job_queue.run_once(
+                _on_add_msg_idle,
+                when=ADD_MSG_IDLE_SECONDS,
+                data={
+                    "session_key": session_key,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "count": count,
+                },
+                name=f"add_msg_idle:{session_key}",
+            )
+            session_data["add_msg_done_job"] = job
+            return
+        except Exception:
+            session_data["add_msg_done_job"] = None
+
     try:
-        job = context.application.job_queue.run_once(
-            _on_add_msg_idle,
-            when=ADD_MSG_IDLE_SECONDS,
-            data={
-                "session_key": session_key,
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "count": count,
-            },
-            name=f"add_msg_idle:{session_key}",
+        task = asyncio.create_task(
+            _add_msg_idle_task(
+                context,
+                session_key=session_key,
+                chat_id=chat_id,
+                message_id=message_id,
+                count=count,
+            )
         )
-        session_data["add_msg_done_job"] = job
+        session_data["add_msg_done_task"] = task
     except Exception:
-        session_data["add_msg_done_job"] = None
+        session_data["add_msg_done_task"] = None
 
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,6 +301,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             session_data["add_msg_done_job"] = None
+
+        task = session_data.get("add_msg_done_task")
+        if task is not None:
+            try:
+                task.cancel()
+            except Exception:
+                pass
+            session_data["add_msg_done_task"] = None
 
         if session_data.get("add_msg_done"):
             session_data["add_msg_done"] = False

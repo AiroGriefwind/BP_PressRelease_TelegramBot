@@ -40,6 +40,7 @@ def new_session_struct() -> Dict[str, Any]:
         "add_msg_count": 0,
         "add_msg_done": False,
         "add_msg_done_job": None,
+        "add_msg_done_task": None,
     }
 
 
@@ -99,6 +100,12 @@ async def end_session(
         if job is not None:
             try:
                 job.schedule_removal()
+            except Exception:
+                pass
+        task = session_data.get("add_msg_done_task")
+        if task is not None:
+            try:
+                task.cancel()
             except Exception:
                 pass
 
