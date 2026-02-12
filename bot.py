@@ -19,6 +19,8 @@ from features.logs_ui import (
     on_log_detail,
     on_logs_back,
     on_logs_days,
+    on_logs_keyword,
+    on_logs_keyword_clear,
     on_logs_mode,
     on_logs_page,
     on_logs_refresh,
@@ -93,6 +95,8 @@ def main():
     app.add_handler(CallbackQueryHandler(on_menu_logs, pattern=r"^menu_logs\|"))
     app.add_handler(CallbackQueryHandler(on_logs_days, pattern=r"^logs_days\|"))
     app.add_handler(CallbackQueryHandler(on_logs_mode, pattern=r"^logs_mode\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_keyword, pattern=r"^logs_keyword\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_keyword_clear, pattern=r"^logs_keyword_clear\|"))
     app.add_handler(CallbackQueryHandler(on_logs_page, pattern=r"^logs_page\|"))
     app.add_handler(CallbackQueryHandler(on_logs_refresh, pattern=r"^logs_refresh\|"))
     app.add_handler(CallbackQueryHandler(on_log_detail, pattern=r"^log_detail\|"))

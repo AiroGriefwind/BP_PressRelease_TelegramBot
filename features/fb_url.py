@@ -312,60 +312,109 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     sd = user_sessions.get(session_key)
-    if not sd or not sd.get("awaiting_fb_url"):
+    if not sd:
         return
 
-    touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
+    if sd.get("awaiting_fb_url"):
+        touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
 
-    raw_url = _extract_first_url(message.text or "")
-    if not raw_url:
-        await message.reply_text("⚠️ 没检测到 URL。请直接发送一条包含 Facebook 分享链接的消息。")
-        return
+        raw_url = _extract_first_url(message.text or "")
+        if not raw_url:
+            await message.reply_text("⚠️ 没检测到 URL。请直接发送一条包含 Facebook 分享链接的消息。")
+            return
 
-    norm = _normalize_fb_url(raw_url)
-    if not _looks_like_facebook_url(norm):
-        await message.reply_text("⚠️ 目前只支持 Facebook 相关链接。请重新发送 FB 分享链接。")
-        return
+        norm = _normalize_fb_url(raw_url)
+        if not _looks_like_facebook_url(norm):
+            await message.reply_text("⚠️ 目前只支持 Facebook 相关链接。请重新发送 FB 分享链接。")
+            return
 
-    sd["fb_url"] = norm
-    sd["awaiting_fb_url"] = False
-    user_sessions[session_key] = sd
+        sd["fb_url"] = norm
+        sd["awaiting_fb_url"] = False
+        user_sessions[session_key] = sd
 
-    log_event(
-        "fb_url_captured",
-        session_key=session_key,
-        session_id=sd.get("session_id"),
-        update=update,
-        extra={"fb_url": norm},
-    )
-
-    # 尝试更新 UI 消息为“确认发送”界面
-    ui_chat_id = sd.get("ui_chat_id")
-    ui_message_id = sd.get("ui_message_id")
-    if ui_chat_id is not None and ui_message_id is not None:
-        buttons = _build_fb_url_confirm_markup(session_key)
-        await try_edit_message_text_markup(
-            context.application,
-            int(ui_chat_id),
-            int(ui_message_id),
-            _build_fb_url_confirm_text(norm, sd.get("settings") or {}),
-            reply_markup=buttons,
-            disable_web_page_preview=True,
-        )
-    else:
-        buttons = _build_fb_url_confirm_markup(session_key)
-        sent = await message.reply_text(
-            _build_fb_url_confirm_text(norm, sd.get("settings") or {}),
-            reply_markup=buttons,
-            disable_web_page_preview=True,
-        )
-        touch_session(
-            context=context,
+        log_event(
+            "fb_url_captured",
             session_key=session_key,
-            user_id=user_id,
-            chat_id=chat_id,
-            message_id=sent.message_id,
+            session_id=sd.get("session_id"),
+            update=update,
+            extra={"fb_url": norm},
         )
+
+        # 尝试更新 UI 消息为“确认发送”界面
+        ui_chat_id = sd.get("ui_chat_id")
+        ui_message_id = sd.get("ui_message_id")
+        if ui_chat_id is not None and ui_message_id is not None:
+            buttons = _build_fb_url_confirm_markup(session_key)
+            await try_edit_message_text_markup(
+                context.application,
+                int(ui_chat_id),
+                int(ui_message_id),
+                _build_fb_url_confirm_text(norm, sd.get("settings") or {}),
+                reply_markup=buttons,
+                disable_web_page_preview=True,
+            )
+        else:
+            buttons = _build_fb_url_confirm_markup(session_key)
+            sent = await message.reply_text(
+                _build_fb_url_confirm_text(norm, sd.get("settings") or {}),
+                reply_markup=buttons,
+                disable_web_page_preview=True,
+            )
+            touch_session(
+                context=context,
+                session_key=session_key,
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=sent.message_id,
+            )
+        return
+
+    if sd.get("awaiting_logs_keyword"):
+        touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
+
+        keyword_raw = (message.text or "").strip()
+        keyword = "" if keyword_raw in ("-", "－") else keyword_raw
+
+        from features.logs_ui import render_logs_menu, set_logs_keyword
+
+        set_logs_keyword(context, session_key, keyword)
+        sd["awaiting_logs_keyword"] = False
+        user_sessions[session_key] = sd
+
+        try:
+            log_event(
+                "logs_keyword_set",
+                session_key=session_key,
+                session_id=sd.get("session_id"),
+                update=update,
+                extra={"keyword": keyword},
+            )
+        except Exception:
+            pass
+
+        ui_chat_id = sd.get("ui_chat_id")
+        ui_message_id = sd.get("ui_message_id")
+        text, reply_markup, _stats = render_logs_menu(context, session_key)
+        if ui_chat_id is not None and ui_message_id is not None:
+            await try_edit_message_text_markup(
+                context.application,
+                int(ui_chat_id),
+                int(ui_message_id),
+                text,
+                reply_markup=reply_markup,
+            )
+        else:
+            sent = await message.reply_text(text, reply_markup=reply_markup)
+            touch_session(
+                context=context,
+                session_key=session_key,
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=sent.message_id,
+            )
+        return
+
+    return
 
 
 async def on_fb_url_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):

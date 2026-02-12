@@ -1,21 +1,28 @@
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 import config
+from core.logging_ops import log_event
 from core.session import touch_session, user_sessions
 from core.time_utils import now_hk
-from features.pr_processing import handle_mention
-from integrations.gmail import fetch_logs_from_gmail, read_logs_cache
+from integrations.gmail import fetch_logs_from_gmail, get_logs_cache_info, read_logs_cache
 from ui.messages import SESSION_EXPIRED_TEXT
 
 
-def _filter_logs(logs: List[Dict[str, Any]], days: int, mode: str) -> List[Dict[str, Any]]:
+def _normalize_keyword(keyword: Optional[str]) -> str:
+    return (keyword or "").strip().lower()
+
+
+def _filter_logs(
+    logs: List[Dict[str, Any]], days: int, mode: str, keyword: Optional[str] = None
+) -> List[Dict[str, Any]]:
     cutoff = now_hk() - timedelta(days=days)
+    kw = _normalize_keyword(keyword)
     out = []
     for x in logs:
         try:
@@ -29,6 +36,11 @@ def _filter_logs(logs: List[Dict[str, Any]], days: int, mode: str) -> List[Dict[
             continue
         if mode == "ERROR" and st != "ERROR":
             continue
+        if kw:
+            title = x.get("title") or ""
+            subject = x.get("subject") or ""
+            if kw not in f"{title} {subject}".lower():
+                continue
         out.append(x)
     out.sort(key=lambda r: r.get("ts", ""), reverse=True)
     return out
@@ -37,31 +49,60 @@ def _filter_logs(logs: List[Dict[str, Any]], days: int, mode: str) -> List[Dict[
 def _get_logs_view(context: ContextTypes.DEFAULT_TYPE, session_key: str) -> Dict[str, Any]:
     key = f"logs_view_{session_key}"
     if key not in context.user_data:
-        context.user_data[key] = {"days": 1, "mode": "ALL", "page": 0}
+        context.user_data[key] = {"days": 1, "mode": "ALL", "page": 0, "keyword": ""}
     return context.user_data[key]
 
 
-async def show_logs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, session_key: str):
-    query = update.callback_query
+def set_logs_keyword(context: ContextTypes.DEFAULT_TYPE, session_key: str, keyword: str) -> Dict[str, Any]:
+    view = _get_logs_view(context, session_key)
+    view["keyword"] = (keyword or "").strip()
+    view["page"] = 0
+    return view
+
+
+def render_logs_menu(
+    context: ContextTypes.DEFAULT_TYPE,
+    session_key: str,
+    *,
+    cache_info: Optional[dict] = None,
+) -> tuple[str, InlineKeyboardMarkup, Dict[str, Any]]:
     view = _get_logs_view(context, session_key)
     days, mode, page = view["days"], view["mode"], view["page"]
+    keyword = view.get("keyword") or ""
 
     logs = read_logs_cache()
-    filtered = _filter_logs(logs, days=days, mode=mode)
+    filtered = _filter_logs(logs, days=days, mode=mode, keyword=keyword)
 
     succ = sum(1 for x in filtered if (x.get("status") or "").upper() == "SUCCESS")
     fail = sum(1 for x in filtered if (x.get("status") or "").upper() == "ERROR")
 
     total = len(filtered)
+    max_page = max(0, (total - 1) // config.LOGS_PER_PAGE) if total else 0
+    if page > max_page:
+        page = max_page
+        view["page"] = page
+
     start = page * config.LOGS_PER_PAGE
     end = start + config.LOGS_PER_PAGE
     items = filtered[start:end]
 
-    text = (
-        f"🧾 Logs（最近{days}天 / {mode}）\n"
-        f"成功: {succ}  失败: {fail}  总计: {total}\n"
-        f"页: {page + 1} / {max(1, (total + config.LOGS_PER_PAGE - 1)//config.LOGS_PER_PAGE)}"
+    cache_info = cache_info or get_logs_cache_info()
+    last_refresh = cache_info.get("last_refresh_ts") or "-"
+    ttl_seconds = cache_info.get("ttl_seconds")
+    ttl_minutes = (
+        max(1, int(ttl_seconds // 60)) if isinstance(ttl_seconds, (int, float)) else "-"
     )
+
+    text_lines = [
+        f"🧾 Logs（最近{days}天 / {mode}）",
+        f"成功: {succ}  失败: {fail}  总计: {total}",
+        f"页: {page + 1} / {max_page + 1}",
+        f"关键词: {keyword or '-'}",
+        f"最后刷新: {last_refresh}  缓存有效期: {ttl_minutes} 分钟",
+    ]
+    if total == 0:
+        text_lines.append("暂无记录，可点击刷新。")
+    text = "\n".join(text_lines)
 
     keyboard = []
     for x in items:
@@ -87,6 +128,12 @@ async def show_logs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, ses
             InlineKeyboardButton("失败", callback_data=f"logs_mode|{session_key}|ERROR"),
         ]
     )
+    keyword_row = [InlineKeyboardButton("🔍 关键词", callback_data=f"logs_keyword|{session_key}")]
+    if keyword:
+        keyword_row.append(
+            InlineKeyboardButton("❌ 清除", callback_data=f"logs_keyword_clear|{session_key}")
+        )
+    keyboard.append(keyword_row)
     keyboard.append(
         [
             InlineKeyboardButton("⬅️ 上一页", callback_data=f"logs_page|{session_key}|-1"),
@@ -100,12 +147,37 @@ async def show_logs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, ses
         ]
     )
 
+    stats = {
+        "days": days,
+        "mode": mode,
+        "page": page,
+        "keyword": keyword,
+        "result_count": total,
+        "succ": succ,
+        "fail": fail,
+    }
+    return text, InlineKeyboardMarkup(keyboard), stats
+
+
+async def show_logs_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    session_key: str,
+    *,
+    cache_info: Optional[dict] = None,
+) -> Dict[str, Any]:
+    query = update.callback_query
+    text, reply_markup, stats = render_logs_menu(
+        context, session_key, cache_info=cache_info
+    )
+
     try:
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(text, reply_markup=reply_markup)
     except BadRequest as e:
         if "Message is not modified" in str(e):
-            return
+            return stats
         raise
+    return stats
 
 
 async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,8 +196,43 @@ async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=query.message.chat.id,
         message_id=query.message.message_id,
     )
-    _get_logs_view(context, session_key)
-    await show_logs_menu(update, context, session_key)
+    view = _get_logs_view(context, session_key)
+
+    cache_info = get_logs_cache_info()
+    logs = read_logs_cache()
+    fetched = None
+    auto_refreshed = False
+    if not logs or cache_info.get("stale"):
+        try:
+            await query.answer("自动刷新中...", cache_time=0)
+        except BadRequest:
+            pass
+        try:
+            fetched = await asyncio.to_thread(fetch_logs_from_gmail, days=view["days"], max_results=200)
+            auto_refreshed = True
+        except Exception:
+            fetched = None
+        cache_info = get_logs_cache_info()
+
+    stats = await show_logs_menu(update, context, session_key, cache_info=cache_info)
+    try:
+        log_event(
+            "logs_open",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={
+                "days": stats.get("days"),
+                "mode": stats.get("mode"),
+                "page": stats.get("page"),
+                "result_count": stats.get("result_count"),
+                "keyword": stats.get("keyword"),
+                "auto_refreshed": auto_refreshed,
+                "fetched": fetched,
+            },
+        )
+    except Exception:
+        pass
 
 
 async def on_logs_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -147,7 +254,23 @@ async def on_logs_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     view = _get_logs_view(context, session_key)
     view["days"] = int(days)
     view["page"] = 0
-    await show_logs_menu(update, context, session_key)
+    stats = await show_logs_menu(update, context, session_key)
+    try:
+        log_event(
+            "logs_days_change",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={
+                "days": stats.get("days"),
+                "mode": stats.get("mode"),
+                "page": stats.get("page"),
+                "result_count": stats.get("result_count"),
+                "keyword": stats.get("keyword"),
+            },
+        )
+    except Exception:
+        pass
 
 
 async def on_logs_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -169,7 +292,23 @@ async def on_logs_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     view = _get_logs_view(context, session_key)
     view["mode"] = mode
     view["page"] = 0
-    await show_logs_menu(update, context, session_key)
+    stats = await show_logs_menu(update, context, session_key)
+    try:
+        log_event(
+            "logs_mode_change",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={
+                "days": stats.get("days"),
+                "mode": stats.get("mode"),
+                "page": stats.get("page"),
+                "result_count": stats.get("result_count"),
+                "keyword": stats.get("keyword"),
+            },
+        )
+    except Exception:
+        pass
 
 
 async def on_logs_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,10 +328,32 @@ async def on_logs_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_id=query.message.message_id,
     )
     view = _get_logs_view(context, session_key)
-    logs = _filter_logs(read_logs_cache(), days=view["days"], mode=view["mode"])
+    logs = _filter_logs(
+        read_logs_cache(),
+        days=view["days"],
+        mode=view["mode"],
+        keyword=view.get("keyword"),
+    )
     max_page = max(0, (len(logs) - 1) // config.LOGS_PER_PAGE)
     view["page"] = min(max(0, view["page"] + int(delta)), max_page)
-    await show_logs_menu(update, context, session_key)
+    stats = await show_logs_menu(update, context, session_key)
+    try:
+        log_event(
+            "logs_page_change",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={
+                "days": stats.get("days"),
+                "mode": stats.get("mode"),
+                "page": stats.get("page"),
+                "result_count": stats.get("result_count"),
+                "keyword": stats.get("keyword"),
+                "delta": int(delta),
+            },
+        )
+    except Exception:
+        pass
 
 
 async def on_logs_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,14 +383,33 @@ async def on_logs_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = _get_logs_view(context, session_key)["days"]
 
     try:
-        await asyncio.to_thread(fetch_logs_from_gmail, days=days, max_results=200)
+        fetched = await asyncio.to_thread(fetch_logs_from_gmail, days=days, max_results=200)
     except Exception as e:
+        fetched = None
         try:
             await query.answer(f"拉取失败: {e}", show_alert=True)
         except BadRequest:
             pass
 
-    await show_logs_menu(update, context, session_key)
+    cache_info = get_logs_cache_info()
+    stats = await show_logs_menu(update, context, session_key, cache_info=cache_info)
+    try:
+        log_event(
+            "logs_refresh",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={
+                "days": stats.get("days"),
+                "mode": stats.get("mode"),
+                "page": stats.get("page"),
+                "result_count": stats.get("result_count"),
+                "keyword": stats.get("keyword"),
+                "fetched": fetched,
+            },
+        )
+    except Exception:
+        pass
 
 
 async def on_log_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -272,6 +452,16 @@ async def on_log_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     keyboard = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"menu_logs|{session_key}")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    try:
+        log_event(
+            "logs_detail_open",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={"log_id": log_id, "status": st, "error_code": code},
+        )
+    except Exception:
+        pass
 
 
 async def on_logs_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,4 +480,80 @@ async def on_logs_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=query.message.chat.id,
         message_id=query.message.message_id,
     )
+    from features.pr_processing import handle_mention
+
     await handle_mention(update, context)
+
+
+async def on_logs_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    sd = user_sessions.get(session_key) or {}
+    sd["awaiting_logs_keyword"] = True
+    user_sessions[session_key] = sd
+
+    try:
+        log_event(
+            "logs_keyword_prompt",
+            session_key=session_key,
+            session_id=sd.get("session_id"),
+            update=update,
+        )
+    except Exception:
+        pass
+
+    buttons = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"menu_logs|{session_key}")]]
+    await query.edit_message_text(
+        "请输入关键词（匹配标题/Subject），发送一条文本即可。发送 '-' 可清空关键词。",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def on_logs_keyword_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    set_logs_keyword(context, session_key, "")
+    stats = await show_logs_menu(update, context, session_key)
+    try:
+        log_event(
+            "logs_keyword_clear",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={
+                "days": stats.get("days"),
+                "mode": stats.get("mode"),
+                "page": stats.get("page"),
+                "result_count": stats.get("result_count"),
+            },
+        )
+    except Exception:
+        pass

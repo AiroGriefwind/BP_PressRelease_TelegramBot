@@ -7,17 +7,24 @@ LOGS_CACHE_PATH = os.path.join(BASE_DIR, "logs_cache.json")
 OPS_LOG_DIR = os.path.join(BASE_DIR, "logs")
 
 LOGS_PER_PAGE = 8
+LOGS_CACHE_TTL_SECONDS = 5 * 60
 
 ERROR_TEXT = {
     100: "沒有找到附件",
     101: "附件內容讀取失敗",
     102: "附件可能是純圖片類型",
+    103: "內容獲取失敗 / 缺少必要字段",
+    104: "無效數據",
+    105: "URL 缺失",
+    106: "配置缺失 files 字段",
+    107: "文件下載失敗",
     200: "敏感詞",
     300: "AI 處理失敗，通用 AI pipeline 失敗",
     301: "Gemini 處理達到限額",
     400: "SEO 信息提取失敗",
     500: "插入 WP 草稿箱失敗",
     501: "插入 WP 草稿箱部分成功：文字 OK，圖片失敗",
+    600: "無法創建任務狀態",
     900: "未知的異常，兜底",
 }
 

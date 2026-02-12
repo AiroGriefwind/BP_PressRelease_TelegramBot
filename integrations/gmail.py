@@ -209,6 +209,27 @@ def ensure_logs_cache():
         json.dump([], f, ensure_ascii=False, indent=2)
 
 
+def get_logs_cache_info() -> dict:
+    ensure_logs_cache()
+    try:
+        mtime = os.path.getmtime(config.LOGS_CACHE_PATH)
+        dt = datetime.fromtimestamp(mtime, now_hk().tzinfo)
+        age_seconds = max(0, int((now_hk() - dt).total_seconds()))
+        return {
+            "last_refresh_ts": dt.isoformat(timespec="seconds"),
+            "age_seconds": age_seconds,
+            "ttl_seconds": config.LOGS_CACHE_TTL_SECONDS,
+            "stale": age_seconds > config.LOGS_CACHE_TTL_SECONDS,
+        }
+    except Exception:
+        return {
+            "last_refresh_ts": None,
+            "age_seconds": None,
+            "ttl_seconds": config.LOGS_CACHE_TTL_SECONDS,
+            "stale": True,
+        }
+
+
 def read_logs_cache() -> List[dict]:
     ensure_logs_cache()
     try:
