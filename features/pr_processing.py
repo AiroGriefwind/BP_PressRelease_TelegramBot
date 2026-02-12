@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import time
 from datetime import datetime
 
@@ -605,6 +606,8 @@ async def on_menu_settings_back(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         message = update.message
+        if not re.search(config.BOT_TRIGGER_PATTERN, message.text or ""):
+            return
         user_id = message.from_user.id
         chat_id = message.chat.id
     else:

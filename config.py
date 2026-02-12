@@ -48,6 +48,10 @@ MAX_SUBJECT_LEN = 160
 FB_URL_BUTTON_TEXT = "FB URL"
 FB_URL_RECENT_SECONDS = 10 * 60  # “上一条URL”兜底：只取最近10分钟
 
+# 仅在明确提及这个机器人用户名时才唤醒主界面
+BOT_TRIGGER_MENTION = "@press_release_to_gmail_bot"
+BOT_TRIGGER_PATTERN = r"(?i)(?<!\w)@press_release_to_gmail_bot\b"
+
 # 可选设置项
 SETTINGS_OPTIONS = {
     "type": ["全文不改", "只改標題", "全文改寫"],

@@ -58,7 +58,9 @@ def main():
     app = ApplicationBuilder().token(bot_token).build()
 
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"@"), handle_mention))
+    app.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(config.BOT_TRIGGER_PATTERN), handle_mention)
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.add_handler(CallbackQueryHandler(on_confirm_send, pattern=r"^confirm_send\|"))
