@@ -27,6 +27,7 @@ from features.logs_ui import (
 from features.pr_processing import (
     handle_file,
     handle_mention,
+    on_main_refresh,
     on_ask_del_all,
     on_ask_del_one,
     on_back_to_main,
@@ -73,6 +74,7 @@ def main():
     )
     app.add_handler(CallbackQueryHandler(on_menu_settings_back, pattern=r"^menu_settings_back\|"))
     app.add_handler(CallbackQueryHandler(on_end_session, pattern=r"^end_session\|"))
+    app.add_handler(CallbackQueryHandler(on_main_refresh, pattern=r"^main_refresh\|"))
     app.add_handler(CallbackQueryHandler(on_fb_url_menu, pattern=r"^fb_url_menu\|"))
     app.add_handler(CallbackQueryHandler(on_fb_url_reset, pattern=r"^fb_url_reset\|"))
     app.add_handler(CallbackQueryHandler(on_fb_url_send, pattern=r"^fb_url_send\|"))

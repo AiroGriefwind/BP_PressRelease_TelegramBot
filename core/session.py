@@ -38,6 +38,8 @@ def new_session_struct() -> Dict[str, Any]:
         "add_msg_id": None,
         "add_msg_ts": 0.0,
         "add_msg_count": 0,
+        "add_msg_done": False,
+        "add_msg_done_job": None,
     }
 
 
@@ -92,6 +94,14 @@ async def end_session(
     # 2) 删除临时文件 & 清 session（并写结束日志）
     session_data = user_sessions.get(session_key)
     if session_data and isinstance(session_data, dict):
+        # 取消附件回执的延迟完成提示
+        job = session_data.get("add_msg_done_job")
+        if job is not None:
+            try:
+                job.schedule_removal()
+            except Exception:
+                pass
+
         # 结束日志：尽量在删除前保留快照
         try:
             log_event(

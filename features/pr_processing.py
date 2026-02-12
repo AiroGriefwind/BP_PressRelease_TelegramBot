@@ -34,6 +34,151 @@ from ui.messages import (
     try_edit_query_message,
 )
 
+ADD_MSG_IDLE_SECONDS = 5
+UI_EXPIRED_TEXT = "新 UI 已生成，请在最新消息操作。"
+
+
+def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKeyboardMarkup]:
+    files = session_data.get("files") or []
+    settings = session_data.get("settings") or config.DEFAULT_SETTINGS.copy()
+
+    file_names = [name for _, name in files]
+    attach_list = "\n".join(file_names) if file_names else "暂无附件"
+    total_bytes = _total_size_bytes(files)
+    total_size_text = _format_size(total_bytes) if files else ""
+    has_non_photo = _has_non_photo(file_names)
+    auto_drive = total_bytes > (config.DRIVE_AUTO_SIZE_MB * 1024 * 1024) if files else False
+    force_drive = settings.get("drive_upload") == "Google Drive"
+    drive_mode = config.USE_DRIVE_SHARE or auto_drive or force_drive
+
+    settings_text = (
+        f"類型：{settings['type']}\n"
+        f"優先度：{settings['priority']}\n"
+        f"語言：{settings['language']}\n"
+        f"发送方式：{settings.get('drive_upload', '普通')}"
+    )
+    fb_url_line = ""
+    try:
+        if session_data.get("fb_url"):
+            fb_url_line = f"\n\nFB URL：\n{session_data.get('fb_url')}"
+    except Exception:
+        fb_url_line = ""
+
+    remind_line = ""
+    if not has_non_photo:
+        if total_size_text:
+            remind_line = f"\n\n⚠️ 尚未添加公关稿本体（非图片附件）。当前总大小：{total_size_text}"
+        else:
+            remind_line = "\n\n⚠️ 尚未添加公关稿本体（非图片附件）。"
+    size_line = ""
+    if drive_mode and files:
+        size_line = (
+            f"\n\n总大小：{total_size_text}\n已超过 {config.DRIVE_AUTO_SIZE_MB}MB，将改用 Drive 共享链接发送。"
+        )
+
+    ui_msg = f"附件列表：\n{attach_list}{remind_line}{size_line}\n\n---\n\n{settings_text}{fb_url_line}"
+
+    buttons = [
+        [
+            InlineKeyboardButton("确认", callback_data=f"confirm_send|{session_key}"),
+            InlineKeyboardButton(config.FB_URL_BUTTON_TEXT, callback_data=f"fb_url_menu|{session_key}"),
+            InlineKeyboardButton("删除", callback_data=f"menu_delete_mode|{session_key}"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}"),
+            InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}"),
+            InlineKeyboardButton("🔄 刷新", callback_data=f"main_refresh|{session_key}"),
+            InlineKeyboardButton("🛑 结束会话", callback_data=f"end_session|{session_key}"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    return ui_msg, reply_markup
+
+
+async def _on_add_msg_idle(context: ContextTypes.DEFAULT_TYPE):
+    data = getattr(context.job, "data", None) or {}
+    session_key = data.get("session_key")
+    chat_id = data.get("chat_id")
+    message_id = data.get("message_id")
+    count = data.get("count")
+    if not session_key or chat_id is None or message_id is None:
+        return
+
+    session_data = user_sessions.get(session_key)
+    if not session_data:
+        return
+    if session_data.get("add_msg_id") != message_id:
+        return
+
+    text = f"✅ 已完成所有附件加载（{count}个）"
+    await try_edit_message_text(
+        context.application,
+        chat_id=int(chat_id),
+        message_id=int(message_id),
+        text=text,
+    )
+    session_data["add_msg_done"] = True
+    session_data["add_msg_done_job"] = None
+
+    ui_chat_id = session_data.get("ui_chat_id")
+    ui_message_id = session_data.get("ui_message_id")
+    if ui_chat_id is not None and ui_message_id is not None:
+        ui_msg, reply_markup = _build_main_ui(session_key, session_data)
+        await try_edit_message_text_markup(
+            context.application,
+            int(ui_chat_id),
+            int(ui_message_id),
+            ui_msg,
+            reply_markup=reply_markup,
+        )
+        try:
+            log_event(
+                "ui_auto_refresh",
+                session_key=session_key,
+                session_id=session_data.get("session_id"),
+                update=None,
+                extra={"reason": "add_msg_complete"},
+            )
+        except Exception:
+            pass
+
+
+def _schedule_add_msg_idle(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    session_key: str,
+    chat_id: int,
+    message_id: int,
+    count: int,
+):
+    session_data = user_sessions.get(session_key)
+    if not session_data or not message_id:
+        return
+
+    job = session_data.get("add_msg_done_job")
+    if job is not None:
+        try:
+            job.schedule_removal()
+        except Exception:
+            pass
+        session_data["add_msg_done_job"] = None
+
+    try:
+        job = context.application.job_queue.run_once(
+            _on_add_msg_idle,
+            when=ADD_MSG_IDLE_SECONDS,
+            data={
+                "session_key": session_key,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "count": count,
+            },
+            name=f"add_msg_idle:{session_key}",
+        )
+        session_data["add_msg_done_job"] = job
+    except Exception:
+        session_data["add_msg_done_job"] = None
+
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -86,6 +231,20 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session_data["add_msg_count"] = int(session_data.get("add_msg_count") or 0) + 1
         except Exception:
             session_data["add_msg_count"] = 1
+
+        job = session_data.get("add_msg_done_job")
+        if job is not None:
+            try:
+                job.schedule_removal()
+            except Exception:
+                pass
+            session_data["add_msg_done_job"] = None
+
+        if session_data.get("add_msg_done"):
+            session_data["add_msg_done"] = False
+            session_data["add_msg_id"] = None
+            session_data["add_msg_ts"] = 0.0
+
         now_ts = time.time()
         should_update = False
         if not session_data.get("add_msg_id"):
@@ -108,6 +267,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent = await message.reply_text(text)
                 session_data["add_msg_id"] = sent.message_id
             session_data["add_msg_ts"] = now_ts
+
+        if session_data.get("add_msg_id"):
+            _schedule_add_msg_idle(
+                context,
+                session_key=session_key,
+                chat_id=message.chat.id,
+                message_id=session_data["add_msg_id"],
+                count=session_data["add_msg_count"],
+            )
 
         try:
             sd = session_data or {}
@@ -157,6 +325,34 @@ async def on_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await show_settings_menu(update, context, session_key, current_settings)
+
+
+async def on_main_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+    try:
+        log_event(
+            "ui_refresh_click",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+        )
+    except Exception:
+        pass
+    await handle_mention(update, context)
 
 
 async def show_settings_menu(
@@ -360,6 +556,28 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = session_data["settings"]
 
     if update.message:
+        old_chat_id = session_data.get("ui_chat_id")
+        old_message_id = session_data.get("ui_message_id")
+        if old_chat_id is not None and old_message_id is not None:
+            await try_edit_message_text_markup(
+                context.application,
+                int(old_chat_id),
+                int(old_message_id),
+                UI_EXPIRED_TEXT,
+                reply_markup=None,
+            )
+            try:
+                log_event(
+                    "ui_expired",
+                    session_key=session_key,
+                    session_id=session_data.get("session_id"),
+                    update=update,
+                    extra={"old_message_id": old_message_id},
+                )
+            except Exception:
+                pass
+
+    if update.message:
         candidate_texts = []
         try:
             candidate_texts.append(update.message.text or "")
@@ -420,58 +638,16 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-    file_names = [name for _, name in files]
-    attach_list = "\n".join(file_names) if file_names else "暂无附件"
-    total_bytes = _total_size_bytes(files)
-    total_size_text = _format_size(total_bytes) if files else ""
-    has_non_photo = _has_non_photo(file_names)
-    auto_drive = total_bytes > (config.DRIVE_AUTO_SIZE_MB * 1024 * 1024) if files else False
-    force_drive = settings.get("drive_upload") == "Google Drive"
-    drive_mode = config.USE_DRIVE_SHARE or auto_drive or force_drive
-
-    settings_text = (
-        f"類型：{settings['type']}\n"
-        f"優先度：{settings['priority']}\n"
-        f"語言：{settings['language']}\n"
-        f"发送方式：{settings.get('drive_upload', '普通')}"
-    )
-    fb_url_line = ""
-    try:
-        if session_data.get("fb_url"):
-            fb_url_line = f"\n\nFB URL：\n{session_data.get('fb_url')}"
-    except Exception:
-        fb_url_line = ""
-
-    remind_line = ""
-    if not has_non_photo:
-        if total_size_text:
-            remind_line = f"\n\n⚠️ 尚未添加公关稿本体（非图片附件）。当前总大小：{total_size_text}"
-        else:
-            remind_line = "\n\n⚠️ 尚未添加公关稿本体（非图片附件）。"
-    size_line = ""
-    if drive_mode and files:
-        size_line = (
-            f"\n\n总大小：{total_size_text}\n已超过 {config.DRIVE_AUTO_SIZE_MB}MB，将改用 Drive 共享链接发送。"
-        )
-    ui_msg = f"附件列表：\n{attach_list}{remind_line}{size_line}\n\n---\n\n{settings_text}{fb_url_line}"
-
-    buttons = [
-        [
-            InlineKeyboardButton("确认", callback_data=f"confirm_send|{session_key}"),
-            InlineKeyboardButton(config.FB_URL_BUTTON_TEXT, callback_data=f"fb_url_menu|{session_key}"),
-            InlineKeyboardButton("删除", callback_data=f"menu_delete_mode|{session_key}"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ 设置", callback_data=f"menu_settings|{session_key}"),
-            InlineKeyboardButton("🧾 Logs", callback_data=f"menu_logs|{session_key}"),
-            InlineKeyboardButton("🛑 结束会话", callback_data=f"end_session|{session_key}"),
-        ],
-    ]
-
-    reply_markup = InlineKeyboardMarkup(buttons)
+    ui_msg, reply_markup = _build_main_ui(session_key, session_data)
 
     if update.callback_query:
-        await message.edit_text(ui_msg, reply_markup=reply_markup)
+        await try_edit_message_text_markup(
+            context.application,
+            message.chat.id,
+            message.message_id,
+            ui_msg,
+            reply_markup=reply_markup,
+        )
         touch_session(
             context=context,
             session_key=session_key,
@@ -488,6 +664,16 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             message_id=sent.message_id,
         )
+        try:
+            log_event(
+                "ui_summoned",
+                session_key=session_key,
+                session_id=session_data.get("session_id"),
+                update=update,
+                extra={"new_message_id": sent.message_id},
+            )
+        except Exception:
+            pass
 
 
 async def on_menu_delete_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
