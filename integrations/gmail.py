@@ -85,6 +85,7 @@ def send_email_with_attachments(service, file_paths, sender_info, file_names, se
 類型：{settings['type']}
 優先度：{settings['priority']}
 語言：{settings['language']}
+target: 來稿
 附件: {', '.join(file_names)}
 """
     message.attach(MIMEText(body, "plain", "utf-8"))
@@ -135,6 +136,7 @@ def send_email_with_drive_links(
 類型：{settings['type']}
 優先度：{settings['priority']}
 語言：{settings['language']}
+target: 來稿
 """
     message.attach(MIMEText(body, "plain", "utf-8"))
 
@@ -187,6 +189,7 @@ def send_email_with_fb_url(service, fb_url: str, sender_info: dict, settings: di
 时间: {sender_info.get('date')}
 類型：{settings.get('type')}
 語言：{settings.get('language')}
+target: 來稿
 """.strip()
 
     message.attach(MIMEText(body, "plain", "utf-8"))
