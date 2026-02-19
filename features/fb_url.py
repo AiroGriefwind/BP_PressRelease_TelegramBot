@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 import config
 from core.logging_ops import log_event
 from core.session import end_session, last_seen_fb_url, touch_session, user_sessions
+from features.pr_text_flow import maybe_process_pr_text
 from core.time_utils import now_hk
 from integrations.gmail import get_gmail_service, send_email_with_fb_url
 from ui.keyboard import build_settings_keyboard
@@ -313,6 +314,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sd = user_sessions.get(session_key)
     if not sd:
+        consumed = await maybe_process_pr_text(
+            update,
+            context,
+            text=message.text or "",
+            source="text_message",
+        )
+        if consumed:
+            return
         return
 
     if sd.get("awaiting_fb_url"):
@@ -412,6 +421,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 message_id=sent.message_id,
             )
+        return
+
+    consumed = await maybe_process_pr_text(
+        update,
+        context,
+        text=message.text or "",
+        source="text_message",
+    )
+    if consumed:
         return
 
     return

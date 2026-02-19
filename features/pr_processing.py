@@ -19,6 +19,7 @@ from features.fb_url import (
     _looks_like_facebook_url,
     _normalize_fb_url,
 )
+from features.pr_text_flow import maybe_process_pr_text
 from integrations.drive import (
     _format_size,
     _has_non_photo,
@@ -268,6 +269,18 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session_data = user_sessions[session_key]
 
     touch_session(context=context, session_key=session_key, user_id=user_id, chat_id=chat_id)
+
+    try:
+        caption_text = (message.caption or "").strip()
+        if caption_text:
+            await maybe_process_pr_text(
+                update,
+                context,
+                text=caption_text,
+                source="media_caption",
+            )
+    except Exception:
+        pass
 
     os.makedirs("temp", exist_ok=True)
     file_id, file_name = None, None

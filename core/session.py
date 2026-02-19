@@ -41,6 +41,10 @@ def new_session_struct() -> Dict[str, Any]:
         "add_msg_done": False,
         "add_msg_done_job": None,
         "add_msg_done_task": None,
+        # 长文本公关稿确认流程
+        "awaiting_pr_confirm": False,
+        "pending_pr_text": None,
+        "pending_pr_meta": None,
     }
 
 

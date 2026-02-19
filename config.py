@@ -69,6 +69,20 @@ DEFAULT_SETTINGS = {
     "drive_upload": "普通",
 }
 
+# 长文本公关稿识别参数
+PR_TEXT_MIN_CHARS = 220
+PR_TEXT_MIN_LINES = 5
+PR_TEXT_MAX_TITLE_LINES = 3
+PR_TEXT_BODY_LINE_MIN_CHARS = 36
+PR_TEXT_ORG_KEYWORDS = [
+    "香港",
+    "工會",
+    "工聯會",
+    "房協",
+    "馬會",
+]
+PR_TEXT_DEBUG = False
+
 # 会话超时（无操作）自动结束：10分钟
 SESSION_TIMEOUT_SECONDS = 10 * 60
 
@@ -76,6 +90,7 @@ SESSION_TIMEOUT_SECONDS = 10 * 60
 def apply_runtime_config(config: dict) -> None:
     global TARGET_EMAIL
     global USE_DRIVE_SHARE, DRIVE_FOLDER_ID, DRIVE_ROOT_FOLDER_NAME
+    global PR_TEXT_DEBUG
 
     try:
         if isinstance(config, dict) and config.get("target_email"):
@@ -89,5 +104,7 @@ def apply_runtime_config(config: dict) -> None:
                 str(config.get("drive_root_folder_name")).strip()
                 or DRIVE_ROOT_FOLDER_NAME
             )
+        if isinstance(config, dict) and config.get("pr_text_debug") is not None:
+            PR_TEXT_DEBUG = bool(config.get("pr_text_debug"))
     except Exception:
         pass
