@@ -26,7 +26,6 @@ from features.logs_ui import (
     on_logs_refresh,
     on_menu_logs,
 )
-from features.pr_text_flow import on_pr_confirm_no, on_pr_confirm_yes
 from features.help_ui import on_help_back_list, on_help_back_main, on_help_detail, on_menu_help
 from features.pr_processing import (
     handle_file,
@@ -109,9 +108,6 @@ def main():
     app.add_handler(CallbackQueryHandler(on_logs_refresh, pattern=r"^logs_refresh\|"))
     app.add_handler(CallbackQueryHandler(on_log_detail, pattern=r"^log_detail\|"))
     app.add_handler(CallbackQueryHandler(on_logs_back, pattern=r"^logs_back\|"))
-    app.add_handler(CallbackQueryHandler(on_pr_confirm_yes, pattern=r"^pr_confirm_yes\|"))
-    app.add_handler(CallbackQueryHandler(on_pr_confirm_no, pattern=r"^pr_confirm_no\|"))
-
     print("Bot 已启动...")
     app.run_polling()
 

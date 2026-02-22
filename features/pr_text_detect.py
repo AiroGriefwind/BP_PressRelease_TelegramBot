@@ -99,11 +99,8 @@ def analyze_pr_text(text: str) -> Dict[str, object]:
     )
     has_org_kw = any(kw in raw for kw in config.PR_TEXT_ORG_KEYWORDS)
 
-    mode = "none"
-    if is_long_enough and has_marker:
-        mode = "auto"
-    elif is_long_enough and (date_tail or has_org_kw):
-        mode = "ask"
+    # 仅按长度触发长文本处理，不再依赖标记或二次确认
+    mode = "auto" if is_long_enough else "none"
 
     structured = _extract_title_and_body(lines, marker_keyword)
     return {

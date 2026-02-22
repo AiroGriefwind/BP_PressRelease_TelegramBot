@@ -47,6 +47,67 @@ def _pick_attachment_title(file_names: List[str]) -> str:
     return "untitled"
 
 
+def _is_meta_header_line(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return True
+    if s in {"即時發放", "即时发放"}:
+        return True
+    if re.fullmatch(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日", s):
+        return True
+    if re.fullmatch(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", s):
+        return True
+    return False
+
+
+def _pick_title_from_pr_body(pr_body_text: str) -> str:
+    lines = [(ln or "").strip() for ln in (pr_body_text or "").splitlines()]
+    filtered = [ln for ln in lines if not _is_meta_header_line(ln)]
+    if not filtered:
+        return ""
+
+    for ln in filtered:
+        m = re.search(r"\*([^*\n]{2,200})\*", ln)
+        if m:
+            return f"*{m.group(1).strip()}*"
+    for ln in filtered:
+        if ln:
+            return ln
+    return ""
+
+
+def _pick_subject_title(file_names: List[str], pr_body_text: str) -> str:
+    attachment_title = _pick_attachment_title(file_names)
+    if attachment_title != "untitled":
+        return attachment_title
+    body_title = _pick_title_from_pr_body(pr_body_text)
+    return body_title or attachment_title
+
+
+def _render_star_bold_html(text: str) -> str:
+    raw = text or ""
+    parts = []
+    last = 0
+    for m in re.finditer(r"\*(.+?)\*", raw, flags=re.DOTALL):
+        parts.append(html.escape(raw[last : m.start()]))
+        parts.append(f"<strong>{html.escape(m.group(1))}</strong>")
+        last = m.end()
+    parts.append(html.escape(raw[last:]))
+    return "".join(parts).replace("\n", "<br>\n")
+
+
+def _attach_plain_and_html_body(message: MIMEMultipart, plain_body: str):
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(plain_body, "plain", "utf-8"))
+    html_body = (
+        '<div style="white-space: pre-wrap; font-family: Arial, sans-serif;">'
+        + _render_star_bold_html(plain_body)
+        + "</div>"
+    )
+    alt.attach(MIMEText(html_body, "html", "utf-8"))
+    message.attach(alt)
+
+
 def get_google_creds():
     creds = None
     if os.path.exists("token.pickle"):
@@ -69,26 +130,30 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=get_google_creds())
 
 
-def send_email_with_attachments(service, file_paths, sender_info, file_names, settings):
+def send_email_with_attachments(
+    service, file_paths, sender_info, file_names, settings, pr_body_text: str = ""
+):
     message = MIMEMultipart()
     message["to"] = config.TARGET_EMAIL
-    subject_title = _pick_attachment_title(list(file_names))
+    subject_title = _pick_subject_title(list(file_names), pr_body_text)
     subject = "新稿件: " + subject_title
     if len(subject) > config.MAX_SUBJECT_LEN:
         subject = subject[: config.MAX_SUBJECT_LEN - 3] + "..."
     message["subject"] = subject
 
+    pr_body_value = (pr_body_text or "").strip() or "無"
     body = f"""
 来自: {sender_info['name']} (@{sender_info['username']})
 群组: {sender_info['chat_title']}
 时间: {sender_info['date']}
+公關稿正文：{pr_body_value}
 類型：{settings['type']}
 優先度：{settings['priority']}
 語言：{settings['language']}
 target: 來稿
 附件: {', '.join(file_names)}
 """
-    message.attach(MIMEText(body, "plain", "utf-8"))
+    _attach_plain_and_html_body(message, body)
 
     for file_path, file_name in zip(file_paths, file_names):
         try:
@@ -115,6 +180,7 @@ def send_email_with_drive_links(
     sender_info,
     file_items,
     settings,
+    pr_body_text: str = "",
     *,
     folder_link: str,
     title: str,
@@ -123,22 +189,25 @@ def send_email_with_drive_links(
 ):
     message = MIMEMultipart()
     message["to"] = config.TARGET_EMAIL
-    subject_title = title or _pick_attachment_title([x.get("name") for x in file_items])
+    fallback_title = _pick_subject_title([x.get("name") for x in file_items], pr_body_text)
+    subject_title = title or fallback_title
     subject = "新稿件(Drive): " + subject_title
     if len(subject) > config.MAX_SUBJECT_LEN:
         subject = subject[: config.MAX_SUBJECT_LEN - 3] + "..."
     message["subject"] = subject
 
+    pr_body_value = (pr_body_text or "").strip() or "無"
     body = f"""
 来自: {sender_info['name']} (@{sender_info['username']})
 群组: {sender_info['chat_title']}
 时间: {sender_info['date']}
+公關稿正文：{pr_body_value}
 類型：{settings['type']}
 優先度：{settings['priority']}
 語言：{settings['language']}
 target: 來稿
 """
-    message.attach(MIMEText(body, "plain", "utf-8"))
+    _attach_plain_and_html_body(message, body)
 
     for file_path, file_name in zip(attachment_paths, attachment_names):
         try:

@@ -49,6 +49,11 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
     total_bytes = _total_size_bytes(files)
     total_size_text = _format_size(total_bytes) if files else ""
     has_non_photo = _has_non_photo(file_names)
+    pr_body_text = (session_data.get("pr_body_text") or "").strip()
+    has_pr_body = bool(pr_body_text)
+    pr_body_status = (
+        "公關稿正文：已暫存，確認後將加入郵件正文" if pr_body_text else "公關稿正文：無"
+    )
     auto_drive = total_bytes > (config.DRIVE_AUTO_SIZE_MB * 1024 * 1024) if files else False
     force_drive = settings.get("drive_upload") == "Google Drive"
     drive_mode = config.USE_DRIVE_SHARE or auto_drive or force_drive
@@ -67,7 +72,7 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
         fb_url_line = ""
 
     remind_line = ""
-    if not has_non_photo:
+    if (not has_non_photo) and (not has_pr_body):
         if total_size_text:
             remind_line = f"\n\n⚠️ 尚未添加公關稿本體（非圖片附件）。當前總大小：{total_size_text}"
         else:
@@ -78,7 +83,10 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
             f"\n\n總大小：{total_size_text}\n已超過 {config.DRIVE_AUTO_SIZE_MB}MB，將改用 Drive 共享連結傳送。"
         )
 
-    ui_msg = f"附件列表：\n{attach_list}{remind_line}{size_line}\n\n---\n\n{settings_text}{fb_url_line}"
+    ui_msg = (
+        f"附件列表：\n{attach_list}\n\n{pr_body_status}{remind_line}{size_line}\n\n---\n\n"
+        f"{settings_text}{fb_url_line}"
+    )
 
     buttons = [
         [
@@ -1015,8 +1023,12 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     session_data = user_sessions.get(session_key)
-    if not session_data or not session_data["files"]:
-        await query.edit_message_text("⚠️ 沒有附件，請先上傳檔案或圖片。")
+    if not session_data:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+    pr_body_text = (session_data.get("pr_body_text") or "").strip()
+    if not session_data.get("files") and not pr_body_text:
+        await query.edit_message_text("⚠️ 沒有可發送內容，請先上傳檔案/圖片，或添加公關稿長信息。")
         return
 
     sending_snapshot = list(session_data.get("files") or [])
@@ -1028,11 +1040,16 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = session_data["settings"]
     message = query.message
 
-    file_paths, file_names = zip(*files)
+    if files:
+        file_paths, file_names = zip(*files)
+        file_paths = list(file_paths)
+        file_names = list(file_names)
+    else:
+        file_paths, file_names = [], []
     total_bytes = _total_size_bytes(files)
-    auto_drive = total_bytes > (config.DRIVE_AUTO_SIZE_MB * 1024 * 1024)
+    auto_drive = bool(files) and (total_bytes > (config.DRIVE_AUTO_SIZE_MB * 1024 * 1024))
     force_drive = settings.get("drive_upload") == "Google Drive"
-    drive_mode = config.USE_DRIVE_SHARE or auto_drive or force_drive
+    drive_mode = bool(files) and (config.USE_DRIVE_SHARE or auto_drive or force_drive)
 
     total_units = (2 + (len(file_names) * 2) + 1) if drive_mode else 3
     done_units = 0
@@ -1098,6 +1115,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_names=list(file_names),
             settings=settings,
             sender_info=sender_info,
+            pr_body_text=pr_body_text,
             message_date=message.date,
             progress_update=_progress_update,
         )
@@ -1113,6 +1131,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sender_info,
             file_names,
             settings,
+            pr_body_text,
         )
         drive_folder_link = None
 
