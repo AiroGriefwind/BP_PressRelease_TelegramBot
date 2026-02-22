@@ -5,7 +5,7 @@ import os
 import pickle
 import re
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from email.header import Header
 from email.mime.application import MIMEApplication
@@ -13,6 +13,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from base64 import urlsafe_b64encode
 
+import markdown
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -84,26 +85,64 @@ def _pick_subject_title(file_names: List[str], pr_body_text: str) -> str:
     return body_title or attachment_title
 
 
-def _render_star_bold_html(text: str) -> str:
-    raw = text or ""
-    parts = []
-    last = 0
-    for m in re.finditer(r"\*(.+?)\*", raw, flags=re.DOTALL):
-        parts.append(html.escape(raw[last : m.start()]))
-        parts.append(f"<strong>{html.escape(m.group(1))}</strong>")
-        last = m.end()
-    parts.append(html.escape(raw[last:]))
-    return "".join(parts).replace("\n", "<br>\n")
+def _render_pr_body_markdown_html(pr_body_text: str, pr_body_html: Optional[str] = None) -> str:
+    if (pr_body_html or "").strip():
+        rich = (pr_body_html or "").strip()
+        # Telegram entities 转出的 HTML 常含换行符但不含块级标签；
+        # 这里显式换成 <br>，避免在邮件客户端被折叠成单段。
+        if not re.search(r"</?(p|div|li|ul|ol|h[1-6]|blockquote|br)\b", rich, flags=re.I):
+            rich = rich.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>\n")
+        return rich
+    raw = (pr_body_text or "").strip()
+    if not raw or raw == "無":
+        return "<p>無</p>"
+    # PR 文案里常用 *xxx* 表示“加粗重点”，这里统一转成 Markdown 粗体。
+    raw = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"**\1**", raw)
+    # Escape raw HTML from user input but preserve Markdown syntax.
+    safe_markdown = html.escape(raw, quote=False)
+    return markdown.markdown(
+        safe_markdown,
+        extensions=["extra", "sane_lists", "nl2br"],
+    )
 
 
-def _attach_plain_and_html_body(message: MIMEMultipart, plain_body: str):
+def _build_email_html(
+    *,
+    sender_info: dict,
+    settings: dict,
+    pr_body_text: str,
+    pr_body_html: Optional[str] = None,
+    attachments_text: Optional[str] = None,
+) -> str:
+    meta_html = (
+        f"<p><strong>来自:</strong> {html.escape(sender_info.get('name', ''))} "
+        f"(@{html.escape(sender_info.get('username', ''))})</p>"
+        f"<p><strong>群组:</strong> {html.escape(sender_info.get('chat_title', ''))}</p>"
+        f"<p><strong>时间:</strong> {html.escape(sender_info.get('date', ''))}</p>"
+        f"<p><strong>類型：</strong>{html.escape(settings.get('type', ''))}</p>"
+        f"<p><strong>優先度：</strong>{html.escape(settings.get('priority', ''))}</p>"
+        f"<p><strong>語言：</strong>{html.escape(settings.get('language', ''))}</p>"
+        f"<p><strong>target:</strong> 來稿</p>"
+    )
+    if attachments_text is not None:
+        meta_html += f"<p><strong>附件:</strong> {html.escape(attachments_text)}</p>"
+
+    rendered_pr_body_html = _render_pr_body_markdown_html(pr_body_text, pr_body_html)
+    return (
+        '<div style="font-family: Arial, sans-serif; font-size: 14px; color: #111;">'
+        f"{meta_html}"
+        "<hr style='border:none;border-top:1px solid #ddd;margin:12px 0;'>"
+        "<p><strong>公關稿正文：</strong></p>"
+        "<div style='line-height:1.7;font-size:14px;'>"
+        f"{rendered_pr_body_html}"
+        "</div>"
+        "</div>"
+    )
+
+
+def _attach_plain_and_html_body(message: MIMEMultipart, plain_body: str, html_body: str):
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(plain_body, "plain", "utf-8"))
-    html_body = (
-        '<div style="white-space: pre-wrap; font-family: Arial, sans-serif;">'
-        + _render_star_bold_html(plain_body)
-        + "</div>"
-    )
     alt.attach(MIMEText(html_body, "html", "utf-8"))
     message.attach(alt)
 
@@ -131,7 +170,13 @@ def get_gmail_service():
 
 
 def send_email_with_attachments(
-    service, file_paths, sender_info, file_names, settings, pr_body_text: str = ""
+    service,
+    file_paths,
+    sender_info,
+    file_names,
+    settings,
+    pr_body_text: str = "",
+    pr_body_html: Optional[str] = None,
 ):
     message = MIMEMultipart()
     message["to"] = config.TARGET_EMAIL
@@ -146,14 +191,22 @@ def send_email_with_attachments(
 来自: {sender_info['name']} (@{sender_info['username']})
 群组: {sender_info['chat_title']}
 时间: {sender_info['date']}
-公關稿正文：{pr_body_value}
 類型：{settings['type']}
 優先度：{settings['priority']}
 語言：{settings['language']}
 target: 來稿
 附件: {', '.join(file_names)}
+
+公關稿正文：{pr_body_value}
 """
-    _attach_plain_and_html_body(message, body)
+    html_body = _build_email_html(
+        sender_info=sender_info,
+        settings=settings,
+        pr_body_text=pr_body_value,
+        pr_body_html=pr_body_html,
+        attachments_text=", ".join(file_names),
+    )
+    _attach_plain_and_html_body(message, body, html_body)
 
     for file_path, file_name in zip(file_paths, file_names):
         try:
@@ -181,6 +234,7 @@ def send_email_with_drive_links(
     file_items,
     settings,
     pr_body_text: str = "",
+    pr_body_html: Optional[str] = None,
     *,
     folder_link: str,
     title: str,
@@ -201,13 +255,20 @@ def send_email_with_drive_links(
 来自: {sender_info['name']} (@{sender_info['username']})
 群组: {sender_info['chat_title']}
 时间: {sender_info['date']}
-公關稿正文：{pr_body_value}
 類型：{settings['type']}
 優先度：{settings['priority']}
 語言：{settings['language']}
 target: 來稿
+
+公關稿正文：{pr_body_value}
 """
-    _attach_plain_and_html_body(message, body)
+    html_body = _build_email_html(
+        sender_info=sender_info,
+        settings=settings,
+        pr_body_text=pr_body_value,
+        pr_body_html=pr_body_html,
+    )
+    _attach_plain_and_html_body(message, body, html_body)
 
     for file_path, file_name in zip(attachment_paths, attachment_names):
         try:

@@ -20,6 +20,7 @@ async def send_drive_mode(
     settings: dict,
     sender_info: dict,
     pr_body_text: str,
+    pr_body_html: str | None,
     message_date,
     progress_update,
 ):
@@ -79,6 +80,7 @@ async def send_drive_mode(
         (file_items or {}).get("items") or [],
         settings,
         pr_body_text,
+        pr_body_html,
         folder_link=(file_items or {}).get("folder_link"),
         title=(file_items or {}).get("title") or "",
         attachment_paths=attach_paths,

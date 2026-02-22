@@ -319,6 +319,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context,
             text=message.text or "",
             source="text_message",
+            rich_html=(message.text_html or ""),
         )
         if consumed:
             return
@@ -428,6 +429,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context,
         text=message.text or "",
         source="text_message",
+        rich_html=(message.text_html or ""),
     )
     if consumed:
         return

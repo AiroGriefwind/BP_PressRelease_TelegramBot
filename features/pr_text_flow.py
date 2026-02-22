@@ -22,7 +22,12 @@ def _ensure_session(update: Update, *, session_key: str):
 
 
 async def maybe_process_pr_text(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, *, text: Optional[str], source: str
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    text: Optional[str],
+    source: str,
+    rich_html: Optional[str] = None,
 ) -> bool:
     message = update.message
     if not message or not text:
@@ -71,6 +76,7 @@ async def maybe_process_pr_text(
     # 直接保留用户长信息原文，避免丢失开头标题行
     pr_body_text = (text or "").strip()
     sd["pr_body_text"] = pr_body_text
+    sd["pr_body_html"] = (rich_html or "").strip() or None
     user_sessions[session_key] = sd
 
     log_event(

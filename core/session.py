@@ -43,6 +43,7 @@ def new_session_struct() -> Dict[str, Any]:
         "add_msg_done_task": None,
         # 长文本公关稿正文（发送邮件时写入正文）
         "pr_body_text": None,
+        "pr_body_html": None,
     }
 
 

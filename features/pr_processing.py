@@ -286,6 +286,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context,
                 text=caption_text,
                 source="media_caption",
+                rich_html=(message.caption_html or ""),
             )
     except Exception:
         pass
@@ -1027,6 +1028,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(SESSION_EXPIRED_TEXT)
         return
     pr_body_text = (session_data.get("pr_body_text") or "").strip()
+    pr_body_html = (session_data.get("pr_body_html") or "").strip() or None
     if not session_data.get("files") and not pr_body_text:
         await query.edit_message_text("⚠️ 沒有可發送內容，請先上傳檔案/圖片，或添加公關稿長信息。")
         return
@@ -1116,6 +1118,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             settings=settings,
             sender_info=sender_info,
             pr_body_text=pr_body_text,
+            pr_body_html=pr_body_html,
             message_date=message.date,
             progress_update=_progress_update,
         )
@@ -1132,6 +1135,7 @@ async def on_confirm_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_names,
             settings,
             pr_body_text,
+            pr_body_html,
         )
         drive_folder_link = None
 
