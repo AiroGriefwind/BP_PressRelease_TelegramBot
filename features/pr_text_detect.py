@@ -91,9 +91,7 @@ def analyze_pr_text(text: str) -> Dict[str, object]:
 
     marker_keyword = _detect_marker_keyword(top_lines)
     has_marker = bool(marker_keyword)
-    is_long_enough = (
-        compact_len >= config.PR_TEXT_MIN_CHARS and non_empty_count >= config.PR_TEXT_MIN_LINES
-    )
+    is_long_enough = compact_len >= config.PR_TEXT_MIN_CHARS
     date_tail = any(
         re.search(r"(20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)", ln) for ln in non_empty[-4:]
     )
