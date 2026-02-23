@@ -7,3 +7,5 @@ logs_cache.json
 /temp
 *.pyc
 
+integrations/__pycache__/gmail.cpython-313.pyc
+features/__pycache__/pr_processing.cpython-313.pyc

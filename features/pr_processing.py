@@ -54,6 +54,18 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
     pr_body_status = (
         "公關稿正文：已暫存，確認後將加入郵件正文" if pr_body_text else "公關稿正文：無"
     )
+    # 添加长信息预览：前五个字...最后三个字
+    pr_body_preview = ""
+    if pr_body_text:
+        # 移除换行符和多余空格，获取纯文本
+        clean_text = " ".join(pr_body_text.split())
+        if len(clean_text) > 8:
+            first_part = clean_text[:5]
+            last_part = clean_text[-3:]
+            pr_body_preview = f"\n*{first_part}*...*{last_part}*"
+        elif len(clean_text) > 0:
+            # 如果内容少于8个字符，直接显示全部（用*包裹）
+            pr_body_preview = f"\n*{clean_text}*"
     auto_drive = total_bytes > (config.DRIVE_AUTO_SIZE_MB * 1024 * 1024) if files else False
     force_drive = settings.get("drive_upload") == "Google Drive"
     drive_mode = config.USE_DRIVE_SHARE or auto_drive or force_drive
@@ -78,13 +90,16 @@ def _build_main_ui(session_key: str, session_data: dict) -> tuple[str, InlineKey
         else:
             remind_line = "\n\n⚠️ 尚未添加公關稿本體（非圖片附件）。"
     size_line = ""
-    if drive_mode and files:
-        size_line = (
-            f"\n\n總大小：{total_size_text}\n已超過 {config.DRIVE_AUTO_SIZE_MB}MB，將改用 Drive 共享連結傳送。"
-        )
+    if files and total_size_text:
+        if auto_drive:
+            size_line = (
+                f"\n\n總大小：{total_size_text}\n已超過 {config.DRIVE_AUTO_SIZE_MB}MB，將改用 Drive 共享連結傳送。"
+            )
+        else:
+            size_line = f"\n\n總大小：{total_size_text}"
 
     ui_msg = (
-        f"附件列表：\n{attach_list}\n\n{pr_body_status}{remind_line}{size_line}\n\n---\n\n"
+        f"附件列表：\n{attach_list}\n\n{pr_body_status}{pr_body_preview}{remind_line}{size_line}\n\n---\n\n"
         f"{settings_text}{fb_url_line}"
     )
 
@@ -817,6 +832,26 @@ async def on_menu_delete_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             ]
         )
+    
+    # 添加长信息删除选项
+    pr_body_text = (session_data.get("pr_body_text") or "").strip()
+    if pr_body_text:
+        # 生成预览文本
+        clean_text = " ".join(pr_body_text.split())
+        if len(clean_text) > 20:
+            preview_text = clean_text[:10] + "..." + clean_text[-7:]
+        else:
+            preview_text = clean_text
+        max_len = 35
+        if len(preview_text) > max_len:
+            preview_text = preview_text[: max_len - 1] + "…"
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"❌ 長信息：{preview_text}", callback_data=f"ask_del_pr_body|{session_key}"
+                )
+            ]
+        )
 
     keyboard.append(
         [
@@ -826,7 +861,8 @@ async def on_menu_delete_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    msg_text = "點擊紅色 X 刪除特定附件：" if files else "暫無附件可刪除。"
+    has_items = bool(files) or bool(pr_body_text)
+    msg_text = "點擊紅色 X 刪除特定附件：" if has_items else "暫無附件可刪除。"
 
     await try_edit_message_text_markup(
         context.application,
@@ -930,6 +966,84 @@ async def on_do_del_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await on_menu_delete_mode(update, context)
 
 
+async def on_ask_del_pr_body(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+
+    session_data = user_sessions.get(
+        session_key, {"files": [], "settings": config.DEFAULT_SETTINGS.copy()}
+    )
+    pr_body_text = (session_data.get("pr_body_text") or "").strip()
+
+    if not pr_body_text:
+        await try_edit_message_text_markup(
+            context.application,
+            query.message.chat.id,
+            query.message.message_id,
+            "⚠️ 長信息不存在或已被刪除。",
+            reply_markup=None,
+        )
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton("是，刪除", callback_data=f"do_del_pr_body|{session_key}"),
+            InlineKeyboardButton("否，返回", callback_data=f"menu_delete_mode|{session_key}"),
+        ]
+    ]
+    await try_edit_message_text_markup(
+        context.application,
+        query.message.chat.id,
+        query.message.message_id,
+        "確定要刪除長信息嗎？",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def on_do_del_pr_body(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("已刪除")
+
+    touch_session(
+        context=context,
+        session_key=query.data.split("|")[1],
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+    session_key = query.data.split("|")[1]
+
+    session_data = user_sessions.get(
+        session_key, {"files": [], "settings": config.DEFAULT_SETTINGS.copy()}
+    )
+
+    if session_data.get("pr_body_text"):
+        session_data["pr_body_text"] = None
+        session_data["pr_body_html"] = None
+        user_sessions[session_key] = session_data
+
+        try:
+            log_event(
+                "pr_body_deleted",
+                session_key=session_key,
+                session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+                update=update,
+            )
+        except Exception:
+            pass
+
+    await on_menu_delete_mode(update, context)
+
+
 async def on_ask_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -983,6 +1097,24 @@ async def on_do_del_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=query.message.chat.id,
         message_id=query.message.message_id,
     )
+
+    session_data = user_sessions.get(
+        session_key, {"files": [], "settings": config.DEFAULT_SETTINGS.copy()}
+    )
+    files = session_data.get("files") or []
+    
+    # 删除所有文件
+    for file_path, _ in files:
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+    
+    # 删除长信息
+    session_data["files"] = []
+    session_data["pr_body_text"] = None
+    session_data["pr_body_html"] = None
+    user_sessions[session_key] = session_data
 
     await query.answer("所有附件已清空")
     await end_session(

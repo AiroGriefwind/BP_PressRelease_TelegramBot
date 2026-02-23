@@ -78,11 +78,13 @@ def _pick_title_from_pr_body(pr_body_text: str) -> str:
 
 
 def _pick_subject_title(file_names: List[str], pr_body_text: str) -> str:
-    attachment_title = _pick_attachment_title(file_names)
-    if attachment_title != "untitled":
-        return attachment_title
+    # 如果有长信息，优先使用公关稿的标题
     body_title = _pick_title_from_pr_body(pr_body_text)
-    return body_title or attachment_title
+    if body_title:
+        return body_title
+    # 否则使用附件标题
+    attachment_title = _pick_attachment_title(file_names)
+    return attachment_title
 
 
 def _render_pr_body_markdown_html(pr_body_text: str, pr_body_html: Optional[str] = None) -> str:
@@ -92,6 +94,9 @@ def _render_pr_body_markdown_html(pr_body_text: str, pr_body_html: Optional[str]
         # 这里显式换成 <br>，避免在邮件客户端被折叠成单段。
         if not re.search(r"</?(p|div|li|ul|ol|h[1-6]|blockquote|br)\b", rich, flags=re.I):
             rich = rich.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>\n")
+        # PR 文案里常用 *xxx* 表示"加粗重点"，即使 Telegram HTML 也可能有未转换的 *xxx*，需要转换为 <b>xxx</b>
+        # 使用负向前后查找确保不会匹配已经是 **xxx** 的情况（避免匹配 <b>xxx</b> 因为 HTML 中不应该有 * 在标签内）
+        rich = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<b>\1</b>", rich)
         return rich
     raw = (pr_body_text or "").strip()
     if not raw or raw == "無":

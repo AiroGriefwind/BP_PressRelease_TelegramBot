@@ -33,10 +33,12 @@ from features.pr_processing import (
     on_main_refresh,
     on_ask_del_all,
     on_ask_del_one,
+    on_ask_del_pr_body,
     on_back_to_main,
     on_confirm_send,
     on_do_del_all,
     on_do_del_one,
+    on_do_del_pr_body,
     on_end_session,
     on_menu_delete_mode,
     on_menu_settings,
@@ -67,6 +69,8 @@ def main():
     app.add_handler(CallbackQueryHandler(on_menu_delete_mode, pattern=r"^menu_delete_mode\|"))
     app.add_handler(CallbackQueryHandler(on_ask_del_one, pattern=r"^ask_del_one\|"))
     app.add_handler(CallbackQueryHandler(on_do_del_one, pattern=r"^do_del_one\|"))
+    app.add_handler(CallbackQueryHandler(on_ask_del_pr_body, pattern=r"^ask_del_pr_body\|"))
+    app.add_handler(CallbackQueryHandler(on_do_del_pr_body, pattern=r"^do_del_pr_body\|"))
     app.add_handler(CallbackQueryHandler(on_ask_del_all, pattern=r"^ask_del_all\|"))
     app.add_handler(CallbackQueryHandler(on_do_del_all, pattern=r"^do_del_all\|"))
     app.add_handler(CallbackQueryHandler(on_back_to_main, pattern=r"^back_to_main\|"))
