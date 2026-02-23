@@ -293,8 +293,11 @@ target: 來稿
         drive_links_payload, ensure_ascii=False, indent=2
     ).encode("utf-8")
     drive_links_part = MIMEApplication(drive_links_bytes)
+    # 如果同时触发大批量模式和长信息模式，使用不同的JSON文件名
+    has_long_msg = pr_body_value != "無"
+    json_filename = "long_msg_drive_links.json" if has_long_msg else "drive_links.json"
     drive_links_part.add_header(
-        "Content-Disposition", "attachment", filename=("drive_links.json")
+        "Content-Disposition", "attachment", filename=(json_filename)
     )
     message.attach(drive_links_part)
 
