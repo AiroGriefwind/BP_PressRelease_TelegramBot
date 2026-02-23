@@ -12,20 +12,27 @@ from email.parser import BytesParser
 
 
 def find_html_part(msg):
-    """递归查找HTML部分"""
-    if msg.is_multipart():
+    """查找HTML部分，使用简单的walk方法避免递归问题"""
+    try:
+        # 使用walk()方法遍历所有部分，这是最安全的方法
         for part in msg.walk():
-            content_type = part.get_content_type()
-            if content_type == "text/html":
-                return part
-            # 如果是multipart/alternative，继续查找
-            if content_type.startswith("multipart/"):
-                html_part = find_html_part(part)
-                if html_part:
-                    return html_part
-    else:
-        if msg.get_content_type() == "text/html":
+            try:
+                content_type = part.get_content_type()
+                if content_type == "text/html":
+                    return part
+            except Exception:
+                # 跳过无法获取content-type的部分
+                continue
+    except Exception:
+        pass
+    
+    # 如果walk()失败，尝试直接检查
+    try:
+        if not msg.is_multipart() and msg.get_content_type() == "text/html":
             return msg
+    except Exception:
+        pass
+    
     return None
 
 
@@ -65,25 +72,50 @@ def verify_email_html(eml_path):
         
         if not html_part:
             print("❌ 未找到HTML部分！邮件可能只包含纯文本。")
-            return False
-        
-        print("✅ 找到HTML部分")
-        
-        # 获取HTML内容
-        html_content = html_part.get_payload(decode=True)
-        if isinstance(html_content, bytes):
-            html_content = html_content.decode('utf-8', errors='ignore')
+            print("\n尝试使用备用方法查找...")
+            # 备用方法：直接遍历所有部分
+            html_content = None
+            for part in msg.walk():
+                try:
+                    if part.get_content_type() == "text/html":
+                        html_content = part.get_payload(decode=True)
+                        if isinstance(html_content, bytes):
+                            html_content = html_content.decode('utf-8', errors='ignore')
+                        print("✅ 使用备用方法找到HTML部分")
+                        break
+                except Exception:
+                    continue
+            
+            if not html_content:
+                print("❌ 备用方法也未找到HTML部分")
+                return False
+        else:
+            print("✅ 找到HTML部分")
+            
+            # 获取HTML内容
+            try:
+                html_content = html_part.get_payload(decode=True)
+                if isinstance(html_content, bytes):
+                    html_content = html_content.decode('utf-8', errors='ignore')
+            except Exception as e:
+                print(f"⚠️  获取HTML内容时出错: {e}")
+                return False
         
         # 检查是否包含HTML标签
+        if not html_content:
+            print("❌ HTML内容为空")
+            return False
+            
         has_html_tags = '<div' in html_content or '<p>' in html_content or '<strong>' in html_content
         if not has_html_tags:
             print("⚠️  HTML部分存在，但似乎不包含HTML标签")
+            print(f"   内容预览: {html_content[:200]}...")
             return False
         
         print("✅ HTML部分包含HTML标签")
         
         # 检查是否包含公关稿正文
-        if "公關稿正文" in html_content or "公關稿正文" in html_content:
+        if "公關稿正文" in html_content:
             print("✅ 找到公关稿正文部分")
             
             # 提取公关稿正文

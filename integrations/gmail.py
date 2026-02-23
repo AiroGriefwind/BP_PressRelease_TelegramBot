@@ -248,8 +248,21 @@ def send_email_with_drive_links(
 ):
     message = MIMEMultipart()
     message["to"] = config.TARGET_EMAIL
-    fallback_title = _pick_subject_title([x.get("name") for x in file_items], pr_body_text)
-    subject_title = title or fallback_title
+    # 如果有长信息，优先使用公关稿标题；否则使用非图片附件的名字作为标题
+    pr_body_title = _pick_title_from_pr_body(pr_body_text)
+    if pr_body_title:
+        subject_title = pr_body_title
+    else:
+        # 没有长信息时，使用非图片附件的名字作为标题（不使用Drive文件夹标题）
+        # attachment_names 包含非图片附件，优先使用它们
+        attachment_title = _pick_attachment_title(attachment_names)
+        if attachment_title != "untitled":
+            subject_title = attachment_title
+        else:
+            # 如果没有非图片附件，使用所有文件中的第一个非图片文件名
+            all_file_names = [x.get("name") for x in file_items]
+            attachment_title = _pick_attachment_title(all_file_names)
+            subject_title = attachment_title
     subject = "新稿件(Drive): " + subject_title
     if len(subject) > config.MAX_SUBJECT_LEN:
         subject = subject[: config.MAX_SUBJECT_LEN - 3] + "..."
