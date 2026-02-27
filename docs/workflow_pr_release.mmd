@@ -1,0 +1,35 @@
+flowchart TD
+    U1["用户在群里发送附件 图片 或长信息"] --> B1["Bot 接收消息并创建会话"]
+    B1 --> D1{"是否识别为长信息公关稿"}
+    D1 -- 是 --> B2["Bot 暂存公关稿正文"]
+    D1 -- 否 --> B3["Bot 处理附件"]
+    B2 --> B3
+    B3 --> B4["Bot 下载并暂存附件"]
+
+    B4 --> U2["用户唤起主界面"]
+    U2 --> B5["Bot 展示主界面和设置"]
+    B5 --> U3["用户点击确认发送"]
+
+    U3 --> B6["Bot 锁定本批发送快照"]
+    B6 --> D2{"是否走 Drive 模式"}
+
+    D2 -- 否 --> B7["普通模式 发送正文和附件到邮箱"]
+    D2 -- 是 --> B8["大批量模式 上传到 Drive"]
+    B8 --> B9["Bot 发送正文和 Drive 链接到邮箱"]
+
+    B7 --> D3{"发送是否成功"}
+    B9 --> D3
+
+    D3 -- 成功 --> B10["Bot 记录日志 清理文件 结束会话"]
+    D3 -- 失败 --> B11["Bot 提示失败并保留重试状态"]
+
+    B10 --> E1["邮件到达指定邮箱"]
+    B11 --> U4["用户再次点击确认重发"]
+
+    classDef user fill:#E3F2FD,stroke:#1E88E5,color:#0D47A1,stroke-width:1px;
+    classDef bot fill:#F3E5F5,stroke:#8E24AA,color:#4A148C,stroke-width:1px;
+    classDef decision fill:#FFF8E1,stroke:#F9A825,color:#5D4037,stroke-width:1px;
+
+    class U1,U2,U3,U4,E1 user;
+    class B1,B2,B3,B4,B5,B6,B7,B8,B9,B10,B11 bot;
+    class D1,D2,D3 decision;

@@ -1,0 +1,31 @@
+flowchart TD
+    U1["用户唤起主界面"] --> B1["Bot 显示主菜单"]
+    B1 --> U2["用户点击 FB URL"]
+    U2 --> B2["Bot 进入等待输入链接状态"]
+
+    B2 --> U3["用户发送包含链接的消息"]
+    U3 --> B3["Bot 提取并归一化链接"]
+    B3 --> D1{"是否为 Facebook 链接"}
+
+    D1 -- 否 --> B4["Bot 提示链接无效并继续等待"]
+    B4 --> U3
+
+    D1 -- 是 --> B5["Bot 保存链接并展示发送确认"]
+    B5 --> U4["用户点击发送 FB URL"]
+
+    U4 --> B6["Bot 调用 Gmail 发送 FB URL 邮件"]
+    B6 --> D2{"发送是否成功"}
+
+    D2 -- 成功 --> B7["Bot 记录成功并结束会话"]
+    D2 -- 失败 --> B8["Bot 提示失败并允许重试"]
+
+    B7 --> E1["邮件到达指定邮箱"]
+    B8 --> U5["用户可重试发送"]
+
+    classDef user fill:#E3F2FD,stroke:#1E88E5,color:#0D47A1,stroke-width:1px;
+    classDef bot fill:#F3E5F5,stroke:#8E24AA,color:#4A148C,stroke-width:1px;
+    classDef decision fill:#FFF8E1,stroke:#F9A825,color:#5D4037,stroke-width:1px;
+
+    class U1,U2,U3,U4,U5,E1 user;
+    class B1,B2,B3,B4,B5,B6,B7,B8 bot;
+    class D1,D2 decision;

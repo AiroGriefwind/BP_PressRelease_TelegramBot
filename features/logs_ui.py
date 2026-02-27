@@ -14,6 +14,15 @@ from integrations.gmail import fetch_logs_from_gmail, get_logs_cache_info, read_
 from ui.messages import SESSION_EXPIRED_TEXT
 
 
+def _build_logs_home_markup(session_key: str) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("Logs瀏覽", callback_data=f"logs_browse|{session_key}")],
+        [InlineKeyboardButton("Excel導出", callback_data=f"logs_excel_export|{session_key}")],
+        [InlineKeyboardButton("⬅️ 返回", callback_data=f"logs_back|{session_key}")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 def _normalize_keyword(keyword: Optional[str]) -> str:
     return (keyword or "").strip().lower()
 
@@ -196,6 +205,37 @@ async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=query.message.chat.id,
         message_id=query.message.message_id,
     )
+    await query.edit_message_text(
+        "🧾 Logs\n請選擇功能：",
+        reply_markup=_build_logs_home_markup(session_key),
+    )
+    try:
+        log_event(
+            "logs_menu_open",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+        )
+    except Exception:
+        pass
+
+
+async def on_logs_browse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
     view = _get_logs_view(context, session_key)
 
     cache_info = get_logs_cache_info()
@@ -217,7 +257,7 @@ async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = await show_logs_menu(update, context, session_key, cache_info=cache_info)
     try:
         log_event(
-            "logs_open",
+            "logs_browse_open",
             session_key=session_key,
             session_id=(user_sessions.get(session_key) or {}).get("session_id"),
             update=update,
@@ -230,6 +270,89 @@ async def on_menu_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "auto_refreshed": auto_refreshed,
                 "fetched": fetched,
             },
+        )
+    except Exception:
+        pass
+
+
+async def on_logs_excel_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+    buttons = [
+        [InlineKeyboardButton("RTHK Logs", callback_data=f"excel_export_rthk|{session_key}")],
+        [
+            InlineKeyboardButton(
+                "IThinkTrending Logs（開發中）",
+                callback_data=f"excel_export_placeholder|{session_key}|ithinktrending",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "FB URL Logs（開發中）",
+                callback_data=f"excel_export_placeholder|{session_key}|fb_url",
+            )
+        ],
+        [InlineKeyboardButton("⬅️ 返回", callback_data=f"excel_export_back|{session_key}")],
+    ]
+    await query.edit_message_text(
+        "📤 Excel導出\n請選擇要導出的 Logs 類型：",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    try:
+        log_event(
+            "logs_excel_menu_open",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+        )
+    except Exception:
+        pass
+
+
+async def on_excel_export_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+    await query.edit_message_text(
+        "🧾 Logs\n請選擇功能：",
+        reply_markup=_build_logs_home_markup(session_key),
+    )
+
+
+async def on_excel_export_placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("開發中", show_alert=True)
+    _, session_key, feature_name = query.data.split("|")
+    try:
+        log_event(
+            "logs_excel_feature_pending_click",
+            session_key=session_key,
+            session_id=(user_sessions.get(session_key) or {}).get("session_id"),
+            update=update,
+            extra={"feature": feature_name},
         )
     except Exception:
         pass
@@ -450,7 +573,7 @@ async def on_log_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"標題: {title}\n\n"
         f"Subject:\n{subject}"
     )
-    keyboard = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"menu_logs|{session_key}")]]
+    keyboard = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"logs_browse|{session_key}")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     try:
         log_event(
@@ -516,7 +639,7 @@ async def on_logs_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    buttons = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"menu_logs|{session_key}")]]
+    buttons = [[InlineKeyboardButton("⬅️ 返回列表", callback_data=f"logs_browse|{session_key}")]]
     await query.edit_message_text(
         "請輸入關鍵字（匹配標題/Subject），傳送一則文字即可。傳送 '-' 可清空關鍵字。",
         reply_markup=InlineKeyboardMarkup(buttons),

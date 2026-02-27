@@ -16,9 +16,13 @@ from features.fb_url import (
     on_fb_url_settings,
 )
 from features.logs_ui import (
+    on_excel_export_back,
+    on_excel_export_placeholder,
     on_log_detail,
+    on_logs_browse,
     on_logs_back,
     on_logs_days,
+    on_logs_excel_export,
     on_logs_keyword,
     on_logs_keyword_clear,
     on_logs_mode,
@@ -26,6 +30,7 @@ from features.logs_ui import (
     on_logs_refresh,
     on_menu_logs,
 )
+from features.logs_excel import on_excel_export_rthk
 from features.help_ui import on_help_back_list, on_help_back_main, on_help_detail, on_menu_help
 from features.pr_processing import (
     handle_file,
@@ -100,6 +105,13 @@ def main():
         CallbackQueryHandler(on_fb_menu_settings_back, pattern=r"^fb_menu_settings_back\|")
     )
     app.add_handler(CallbackQueryHandler(on_menu_logs, pattern=r"^menu_logs\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_browse, pattern=r"^logs_browse\|"))
+    app.add_handler(CallbackQueryHandler(on_logs_excel_export, pattern=r"^logs_excel_export\|"))
+    app.add_handler(CallbackQueryHandler(on_excel_export_back, pattern=r"^excel_export_back\|"))
+    app.add_handler(
+        CallbackQueryHandler(on_excel_export_placeholder, pattern=r"^excel_export_placeholder\|")
+    )
+    app.add_handler(CallbackQueryHandler(on_excel_export_rthk, pattern=r"^excel_export_rthk\|"))
     app.add_handler(CallbackQueryHandler(on_menu_help, pattern=r"^menu_help\|"))
     app.add_handler(CallbackQueryHandler(on_help_detail, pattern=r"^help_detail\|"))
     app.add_handler(CallbackQueryHandler(on_help_back_list, pattern=r"^help_back_list\|"))
