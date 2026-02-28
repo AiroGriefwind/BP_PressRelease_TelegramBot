@@ -573,6 +573,60 @@ def fetch_logs_from_gmail(days: int = 1, max_results: int = 200) -> int:
     return len(out)
 
 
+def _extract_json_attachment(service, message_id: str, payload: dict) -> Optional[Dict[str, Any]]:
+    """从邮件payload中提取JSON附件并解析"""
+    if not payload:
+        return None
+
+    def _find_json_in_parts(parts: List[dict]) -> Optional[str]:
+        for part in parts:
+            mime = (part.get("mimeType") or "").lower()
+            filename = ""
+            for h in part.get("headers", []):
+                if (h.get("name") or "").lower() == "content-disposition":
+                    cd = h.get("value") or ""
+                    m = re.search(r'filename="?([^"]+)"?', cd, re.IGNORECASE)
+                    if m:
+                        filename = m.group(1)
+                    break
+
+            # 检查是否是JSON附件
+            if filename.lower().endswith(".json") or mime == "application/json":
+                att_id = part.get("body", {}).get("attachmentId")
+                if att_id:
+                    try:
+                        att_resp = service.users().messages().attachments().get(
+                            userId="me", messageId=message_id, id=att_id
+                        ).execute()
+                        att_data = att_resp.get("data", "")
+                        json_str = _b64url_decode(att_data)
+                        return json.loads(json_str)
+                    except Exception:
+                        pass
+
+            # 递归检查子parts
+            if part.get("parts"):
+                result = _find_json_in_parts(part.get("parts", []))
+                if result:
+                    return result
+        return None
+
+    # 检查顶层是否是multipart
+    mime = (payload.get("mimeType") or "").lower()
+    if mime.startswith("multipart/"):
+        parts = payload.get("parts", [])
+        return _find_json_in_parts(parts)
+    elif mime == "application/json":
+        # 直接是JSON
+        body = payload.get("body", {})
+        data = body.get("data")
+        if data:
+            json_str = _b64url_decode(data)
+            return json.loads(json_str)
+
+    return None
+
+
 def fetch_rthk_emails_for_excel(hours: int = 24, max_results: int = 500) -> List[Dict[str, Any]]:
     service = get_gmail_service()
     subject_keyword = "RTHK Batch"
@@ -603,7 +657,7 @@ def fetch_rthk_emails_for_excel(hours: int = 24, max_results: int = 500) -> List
                 if _norm_label_name(lb_name) == target_norm:
                     label_id = lb.get("id")
                     break
-        # 3) 最后做“包含式”匹配，兼容名称有前后缀
+        # 3) 最后做"包含式"匹配，兼容名称有前后缀
         if not label_id:
             for lb in labels:
                 lb_name = lb.get("name") or ""
@@ -654,12 +708,15 @@ def fetch_rthk_emails_for_excel(hours: int = 24, max_results: int = 500) -> List
         if ts_dt < cutoff:
             continue
 
+        # 提取JSON附件
+        json_data = _extract_json_attachment(service, mid, payload)
+
         out.append(
             {
                 "id": mid,
                 "subject": subject,
                 "ts": ts_dt.isoformat(timespec="seconds"),
-                "body_text": _extract_text_from_payload(payload) or "",
+                "json_data": json_data,
             }
         )
 

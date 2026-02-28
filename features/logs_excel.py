@@ -1,7 +1,7 @@
 import asyncio
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
@@ -15,45 +15,32 @@ from integrations.gmail import fetch_rthk_emails_for_excel
 from ui.messages import SESSION_EXPIRED_TEXT
 
 
-def parse_rthk_email_body(body_text: str) -> List[Dict[str, Any]]:
+def parse_rthk_json_data(json_data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """从JSON附件数据解析为Excel行数据"""
     rows: List[Dict[str, Any]] = []
-    current_target = ""
-    current_item: Dict[str, Any] | None = None
+    if not json_data or not isinstance(json_data, list):
+        return rows
 
-    for raw_line in (body_text or "").splitlines():
-        line = (raw_line or "").strip()
-        if not line:
+    for category in json_data:
+        target = category.get("target", "")
+        data_list = category.get("data", [])
+        if not isinstance(data_list, list):
             continue
 
-        if line.lower().startswith("target:"):
-            current_target = line.split(":", 1)[1].strip()
-            continue
+        for item in data_list:
+            rows.append(
+                {
+                    "Target": target,
+                    "Original Subject": item.get("title", ""),
+                    "Post ID": item.get("post_id", ""),
+                    "WP Title": item.get("wp_title", ""),
+                    "url": item.get("url", ""),
+                    "time text": item.get("time_text", ""),
+                    "新聞內文": item.get("body", ""),
+                    "改寫後內文": item.get("wp_body", ""),
+                }
+            )
 
-        m_item = re.match(r"^Item\s*No\.?\s*:\s*(.+)$", line, flags=re.IGNORECASE)
-        if m_item:
-            if current_item:
-                rows.append(current_item)
-            current_item = {
-                "Target": current_target,
-                "Item No.": m_item.group(1).strip(),
-                "Original Subject": "",
-                "Post ID": "",
-                "WP Title": "",
-                "url": "",
-                "time text": "",
-            }
-            continue
-
-        if not current_item:
-            continue
-
-        for key in ("Original Subject", "Post ID", "WP Title", "url", "time text"):
-            if line.lower().startswith(f"{key.lower()}:"):
-                current_item[key] = line.split(":", 1)[1].strip()
-                break
-
-    if current_item:
-        rows.append(current_item)
     return rows
 
 
@@ -66,7 +53,16 @@ def generate_rthk_excel(items: List[Dict[str, Any]]) -> tuple[str, int]:
     ws = wb.active
     ws.title = "RTHK Logs"
 
-    headers = ["Target", "Item No.", "Original Subject", "Post ID", "WP Title", "url", "time text"]
+    headers = [
+        "Target",
+        "Original Subject",
+        "Post ID",
+        "WP Title",
+        "url",
+        "time text",
+        "新聞內文",
+        "改寫後內文",
+    ]
     ws.append(headers)
 
     for col_idx in range(1, len(headers) + 1):
@@ -77,17 +73,22 @@ def generate_rthk_excel(items: List[Dict[str, Any]]) -> tuple[str, int]:
     for item in items:
         ws.append([item.get(h, "") for h in headers])
 
-    ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 10
-    ws.column_dimensions["C"].width = 40
-    ws.column_dimensions["D"].width = 16
-    ws.column_dimensions["E"].width = 52
-    ws.column_dimensions["F"].width = 52
-    ws.column_dimensions["G"].width = 24
+    # 设置列宽
+    ws.column_dimensions["A"].width = 14  # Target
+    ws.column_dimensions["B"].width = 40  # Original Subject
+    ws.column_dimensions["C"].width = 16  # Post ID
+    ws.column_dimensions["D"].width = 52  # WP Title
+    ws.column_dimensions["E"].width = 52  # url
+    ws.column_dimensions["F"].width = 24  # time text
+    ws.column_dimensions["G"].width = 60  # 新聞內文
+    ws.column_dimensions["H"].width = 60  # 改寫後內文
 
+    # 设置文本换行：WP Title, url, 新聞內文, 改寫後內文
     for row_idx in range(2, ws.max_row + 1):
-        ws.cell(row=row_idx, column=5).alignment = Alignment(wrap_text=True, vertical="top")
-        ws.cell(row=row_idx, column=6).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(row=row_idx, column=4).alignment = Alignment(wrap_text=True, vertical="top")  # WP Title
+        ws.cell(row=row_idx, column=5).alignment = Alignment(wrap_text=True, vertical="top")  # url
+        ws.cell(row=row_idx, column=7).alignment = Alignment(wrap_text=True, vertical="top")  # 新聞內文
+        ws.cell(row=row_idx, column=8).alignment = Alignment(wrap_text=True, vertical="top")  # 改寫後內文
 
     wb.save(output_path)
     return output_path, len(items)
@@ -144,7 +145,8 @@ async def on_excel_export_rthk(update: Update, context: ContextTypes.DEFAULT_TYP
 
         all_items: List[Dict[str, Any]] = []
         for one in emails:
-            all_items.extend(parse_rthk_email_body(one.get("body_text", "")))
+            json_data = one.get("json_data")
+            all_items.extend(parse_rthk_json_data(json_data))
 
         log_event(
             "logs_excel_parse_done",
