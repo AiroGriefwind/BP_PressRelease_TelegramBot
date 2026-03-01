@@ -30,12 +30,12 @@ def parse_rthk_json_data(json_data: Optional[Dict[str, Any]]) -> List[Dict[str, 
         for item in data_list:
             rows.append(
                 {
+                    "Post ID": item.get("post_id", ""),
                     "Target": target,
                     "Original Subject": item.get("title", ""),
-                    "Post ID": item.get("post_id", ""),
                     "WP Title": item.get("wp_title", ""),
-                    "url": item.get("url", ""),
-                    "time text": item.get("time_text", ""),
+                    "Original URL": item.get("url", ""),
+                    "Original Time Text": item.get("time_text", ""),
                     "新聞內文": item.get("body", ""),
                     "改寫後內文": item.get("wp_body", ""),
                 }
@@ -45,6 +45,8 @@ def parse_rthk_json_data(json_data: Optional[Dict[str, Any]]) -> List[Dict[str, 
 
 
 def generate_rthk_excel(items: List[Dict[str, Any]]) -> tuple[str, int]:
+    from openpyxl.cell.cell import Hyperlink
+
     os.makedirs("temp", exist_ok=True)
     filename = f"RTHK News改寫狀況一覽_{now_hk().strftime('%m%d_%H%M%S')}.xlsx"
     output_path = os.path.join("temp", filename)
@@ -54,12 +56,12 @@ def generate_rthk_excel(items: List[Dict[str, Any]]) -> tuple[str, int]:
     ws.title = "RTHK Logs"
 
     headers = [
+        "Post ID",
         "Target",
         "Original Subject",
-        "Post ID",
         "WP Title",
-        "url",
-        "time text",
+        "Original URL",
+        "Original Time Text",
         "新聞內文",
         "改寫後內文",
     ]
@@ -70,25 +72,51 @@ def generate_rthk_excel(items: List[Dict[str, Any]]) -> tuple[str, int]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
+    # 写入数据并设置格式
     for item in items:
-        ws.append([item.get(h, "") for h in headers])
+        row_data = [item.get(h, "") for h in headers]
+        ws.append(row_data)
+        row_idx = ws.max_row
+
+        # 设置 Original Subject 和 WP Title 的对齐（都贴上面，vertical="top"）
+        ws.cell(row=row_idx, column=3).alignment = Alignment(wrap_text=True, vertical="top")  # Original Subject
+        ws.cell(row=row_idx, column=4).alignment = Alignment(wrap_text=True, vertical="top")  # WP Title
+
+        # 设置文本换行：Original URL, 新聞內文, 改寫後內文
+        ws.cell(row=row_idx, column=5).alignment = Alignment(wrap_text=True, vertical="top")  # Original URL
+        ws.cell(row=row_idx, column=7).alignment = Alignment(wrap_text=True, vertical="top")  # 新聞內文
+        ws.cell(row=row_idx, column=8).alignment = Alignment(wrap_text=True, vertical="top")  # 改寫後內文
+
+        # 设置 URL 为超链接
+        url_value = row_data[4]  # Original URL 在第5列（索引4）
+        if url_value and url_value.startswith("http"):
+            url_cell = ws.cell(row=row_idx, column=5)
+            url_cell.hyperlink = url_value
+            url_cell.font = Font(color="0000FF", underline="single")
 
     # 设置列宽
-    ws.column_dimensions["A"].width = 14  # Target
-    ws.column_dimensions["B"].width = 40  # Original Subject
-    ws.column_dimensions["C"].width = 16  # Post ID
+    ws.column_dimensions["A"].width = 16  # Post ID
+    ws.column_dimensions["B"].width = 14  # Target
+    # Original Subject (C列) 自动调整宽度
     ws.column_dimensions["D"].width = 52  # WP Title
-    ws.column_dimensions["E"].width = 52  # url
-    ws.column_dimensions["F"].width = 24  # time text
+    ws.column_dimensions["E"].width = 52  # Original URL
+    ws.column_dimensions["F"].width = 24  # Original Time Text
     ws.column_dimensions["G"].width = 60  # 新聞內文
     ws.column_dimensions["H"].width = 60  # 改寫後內文
 
-    # 设置文本换行：WP Title, url, 新聞內文, 改寫後內文
-    for row_idx in range(2, ws.max_row + 1):
-        ws.cell(row=row_idx, column=4).alignment = Alignment(wrap_text=True, vertical="top")  # WP Title
-        ws.cell(row=row_idx, column=5).alignment = Alignment(wrap_text=True, vertical="top")  # url
-        ws.cell(row=row_idx, column=7).alignment = Alignment(wrap_text=True, vertical="top")  # 新聞內文
-        ws.cell(row=row_idx, column=8).alignment = Alignment(wrap_text=True, vertical="top")  # 改寫後內文
+    # 自动调整 Original Subject 列宽（根据内容）
+    max_length = 0
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=3, max_col=3):
+        for cell in row:
+            try:
+                if cell.value:
+                    # 计算中文字符长度（中文字符通常占2个字符宽度）
+                    cell_length = sum(2 if ord(c) > 127 else 1 for c in str(cell.value))
+                    max_length = max(max_length, cell_length)
+            except Exception:
+                pass
+    # 设置列宽，留一些边距
+    ws.column_dimensions["C"].width = min(max(max_length + 2, 20), 100)
 
     wb.save(output_path)
     return output_path, len(items)
