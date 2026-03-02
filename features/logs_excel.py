@@ -184,9 +184,7 @@ async def on_excel_export_rthk(update: Update, context: ContextTypes.DEFAULT_TYP
             extra={"source": "RTHK", "item_count": len(all_items)},
         )
 
-        output_path, row_count = await asyncio.to_thread(
-            generate_rthk_excel, all_items, "Dot Dot News"
-        )
+        output_path, row_count = await asyncio.to_thread(generate_rthk_excel, all_items)
         file_size = os.path.getsize(output_path)
         log_event(
             "logs_excel_generate_done",
@@ -327,7 +325,9 @@ async def on_excel_export_dotdot(update: Update, context: ContextTypes.DEFAULT_T
             extra={"source": "DotDot News", "item_count": len(all_items)},
         )
 
-        output_path, row_count = await asyncio.to_thread(generate_rthk_excel, all_items)
+        output_path, row_count = await asyncio.to_thread(
+            generate_rthk_excel, all_items, "Dot Dot News"
+        )
         file_size = os.path.getsize(output_path)
         log_event(
             "logs_excel_generate_done",
