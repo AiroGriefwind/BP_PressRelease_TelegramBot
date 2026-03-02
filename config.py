@@ -5,6 +5,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 日志缓存文件路径
 LOGS_CACHE_PATH = os.path.join(BASE_DIR, "logs_cache.json")
 OPS_LOG_DIR = os.path.join(BASE_DIR, "logs")
+OPS_LOG_ARCHIVE_ENABLED = False
+OPS_LOG_ARCHIVE_BUCKET = ""
+OPS_LOG_ARCHIVE_PREFIX = "bp_logs"
+OPS_LOG_ARCHIVE_TIMEZONE = "Asia/Hong_Kong"
+OPS_LOG_ARCHIVE_CREDENTIALS_JSON = ""
+OPS_LOG_ARCHIVE_ADMIN_USER_IDS = []
 
 LOGS_PER_PAGE = 8
 LOGS_CACHE_TTL_SECONDS = 5 * 60
@@ -91,6 +97,9 @@ def apply_runtime_config(config: dict) -> None:
     global TARGET_EMAIL
     global USE_DRIVE_SHARE, DRIVE_FOLDER_ID, DRIVE_ROOT_FOLDER_NAME
     global PR_TEXT_DEBUG
+    global OPS_LOG_ARCHIVE_ENABLED, OPS_LOG_ARCHIVE_BUCKET, OPS_LOG_ARCHIVE_PREFIX
+    global OPS_LOG_ARCHIVE_TIMEZONE, OPS_LOG_ARCHIVE_CREDENTIALS_JSON
+    global OPS_LOG_ARCHIVE_ADMIN_USER_IDS
 
     try:
         if isinstance(config, dict) and config.get("target_email"):
@@ -106,5 +115,27 @@ def apply_runtime_config(config: dict) -> None:
             )
         if isinstance(config, dict) and config.get("pr_text_debug") is not None:
             PR_TEXT_DEBUG = bool(config.get("pr_text_debug"))
+        if isinstance(config, dict) and config.get("ops_log_archive_enabled") is not None:
+            OPS_LOG_ARCHIVE_ENABLED = bool(config.get("ops_log_archive_enabled"))
+        if isinstance(config, dict) and config.get("ops_log_archive_bucket"):
+            OPS_LOG_ARCHIVE_BUCKET = str(config.get("ops_log_archive_bucket")).strip()
+        if isinstance(config, dict) and config.get("ops_log_archive_prefix") is not None:
+            OPS_LOG_ARCHIVE_PREFIX = str(config.get("ops_log_archive_prefix")).strip()
+        if isinstance(config, dict) and config.get("ops_log_archive_timezone"):
+            OPS_LOG_ARCHIVE_TIMEZONE = str(config.get("ops_log_archive_timezone")).strip()
+        if isinstance(config, dict) and config.get("ops_log_archive_credentials_json") is not None:
+            OPS_LOG_ARCHIVE_CREDENTIALS_JSON = (
+                str(config.get("ops_log_archive_credentials_json")).strip()
+            )
+        if isinstance(config, dict) and config.get("ops_log_archive_admin_user_ids") is not None:
+            raw_admins = config.get("ops_log_archive_admin_user_ids")
+            if isinstance(raw_admins, list):
+                cleaned = []
+                for x in raw_admins:
+                    try:
+                        cleaned.append(int(x))
+                    except Exception:
+                        continue
+                OPS_LOG_ARCHIVE_ADMIN_USER_IDS = cleaned
     except Exception:
         pass

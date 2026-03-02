@@ -1,8 +1,11 @@
 import json
+from datetime import time
+from zoneinfo import ZoneInfo
 
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 import config
+from core.logging_ops import log_event
 from features.fb_url import (
     handle_text,
     on_fb_menu_settings_back,
@@ -32,6 +35,7 @@ from features.logs_ui import (
 )
 from features.logs_excel import on_excel_export_dotdot, on_excel_export_rthk
 from features.help_ui import on_help_back_list, on_help_back_main, on_help_detail, on_menu_help
+from features.opslog_admin import on_opslog_push, on_opslog_push_today
 from features.pr_processing import (
     handle_file,
     handle_mention,
@@ -53,6 +57,15 @@ from features.pr_processing import (
     on_settings_cancel_confirm,
     on_settings_confirm,
 )
+from integrations.ops_log_archive import upload_ops_log_by_day
+
+
+async def _daily_ops_log_archive_job(context):
+    result = upload_ops_log_by_day("yesterday")
+    try:
+        log_event("opslog_archive_daily", extra=result)
+    except Exception:
+        pass
 
 
 def main():
@@ -64,7 +77,20 @@ def main():
 
     app = ApplicationBuilder().token(bot_token).build()
 
+    if config.OPS_LOG_ARCHIVE_ENABLED:
+        try:
+            tz = ZoneInfo(config.OPS_LOG_ARCHIVE_TIMEZONE or "Asia/Hong_Kong")
+        except Exception:
+            tz = ZoneInfo("Asia/Hong_Kong")
+        app.job_queue.run_daily(
+            _daily_ops_log_archive_job,
+            time=time(hour=0, minute=0, second=0, tzinfo=tz),
+            name="opslog_archive_daily",
+        )
+
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
+    app.add_handler(CommandHandler("opslog_push", on_opslog_push))
+    app.add_handler(CommandHandler("opslog_push_today", on_opslog_push_today))
     app.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(config.BOT_TRIGGER_PATTERN), handle_mention)
     )
