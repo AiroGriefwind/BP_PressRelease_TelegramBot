@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import os
 import sys
 
@@ -8,22 +7,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-import config
 from core.logging_ops import log_event
+from core.runtime_config import load_runtime_config_from_file
 from integrations.ops_log_archive import format_upload_result, resolve_day_yyyymmdd, upload_ops_log_by_day
-
-
-def _load_runtime_config(base_dir: str) -> None:
-    cfg_path = os.path.join(base_dir, "config.json")
-    if not os.path.exists(cfg_path):
-        return
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        if isinstance(cfg, dict):
-            config.apply_runtime_config(cfg)
-    except Exception:
-        return
 
 
 def main() -> int:
@@ -35,7 +21,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    _load_runtime_config(BASE_DIR)
+    load_runtime_config_from_file(os.path.join(BASE_DIR, "config.json"))
 
     day = (args.day or "today").strip().lower()
     try:

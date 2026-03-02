@@ -4,6 +4,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from core.logging_ops import log_event
+from core.runtime_config import load_runtime_config_from_file
 from integrations.ops_log_archive import (
     format_upload_result,
     is_archive_admin,
@@ -30,6 +31,9 @@ async def _run_push(
 
     if not msg:
         return
+
+    # 命令触发前重载一次配置，避免 Bot 常驻进程持有旧配置
+    load_runtime_config_from_file("config.json")
 
     if not is_archive_admin(getattr(user, "id", None)):
         await msg.reply_text("你没有权限执行该命令。")

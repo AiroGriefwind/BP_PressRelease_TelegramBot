@@ -6,6 +6,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 
 import config
 from core.logging_ops import log_event
+from core.runtime_config import load_runtime_config_from_file
 from features.fb_url import (
     handle_text,
     on_fb_menu_settings_back,
@@ -61,6 +62,7 @@ from integrations.ops_log_archive import upload_ops_log_by_day
 
 
 async def _daily_ops_log_archive_job(context):
+    load_runtime_config_from_file("config.json")
     result = upload_ops_log_by_day("yesterday")
     try:
         log_event("opslog_archive_daily", extra=result)
@@ -77,16 +79,15 @@ def main():
 
     app = ApplicationBuilder().token(bot_token).build()
 
-    if config.OPS_LOG_ARCHIVE_ENABLED:
-        try:
-            tz = ZoneInfo(config.OPS_LOG_ARCHIVE_TIMEZONE or "Asia/Hong_Kong")
-        except Exception:
-            tz = ZoneInfo("Asia/Hong_Kong")
-        app.job_queue.run_daily(
-            _daily_ops_log_archive_job,
-            time=time(hour=0, minute=0, second=0, tzinfo=tz),
-            name="opslog_archive_daily",
-        )
+    try:
+        tz = ZoneInfo(config.OPS_LOG_ARCHIVE_TIMEZONE or "Asia/Hong_Kong")
+    except Exception:
+        tz = ZoneInfo("Asia/Hong_Kong")
+    app.job_queue.run_daily(
+        _daily_ops_log_archive_job,
+        time=time(hour=0, minute=0, second=0, tzinfo=tz),
+        name="opslog_archive_daily",
+    )
 
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(CommandHandler("opslog_push", on_opslog_push))
