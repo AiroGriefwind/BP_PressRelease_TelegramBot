@@ -293,6 +293,7 @@ async def on_logs_excel_export(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     buttons = [
         [InlineKeyboardButton("RTHK Logs", callback_data=f"excel_export_rthk|{session_key}")],
+        [InlineKeyboardButton("Dot Dot News Logs", callback_data=f"excel_export_dotdot|{session_key}")],
         [
             InlineKeyboardButton(
                 "IThinkTrending Logs（開發中）",

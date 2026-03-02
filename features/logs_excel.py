@@ -11,7 +11,7 @@ from telegram.ext import ContextTypes
 from core.logging_ops import log_event
 from core.session import end_session, touch_session, user_sessions
 from core.time_utils import now_hk
-from integrations.gmail import fetch_rthk_emails_for_excel
+from integrations.gmail import fetch_dotdot_emails_for_excel, fetch_rthk_emails_for_excel
 from ui.messages import SESSION_EXPIRED_TEXT
 
 
@@ -44,11 +44,11 @@ def parse_rthk_json_data(json_data: Optional[Dict[str, Any]]) -> List[Dict[str, 
     return rows
 
 
-def generate_rthk_excel(items: List[Dict[str, Any]]) -> tuple[str, int]:
+def generate_rthk_excel(items: List[Dict[str, Any]], report_name: str = "RTHK News") -> tuple[str, int]:
     from openpyxl.cell.cell import Hyperlink
 
     os.makedirs("temp", exist_ok=True)
-    filename = f"RTHK News改寫狀況一覽_{now_hk().strftime('%m%d_%H%M%S')}.xlsx"
+    filename = f"{report_name}改寫狀況一覽_{now_hk().strftime('%m%d_%H%M%S')}.xlsx"
     output_path = os.path.join("temp", filename)
 
     wb = Workbook()
@@ -184,7 +184,9 @@ async def on_excel_export_rthk(update: Update, context: ContextTypes.DEFAULT_TYP
             extra={"source": "RTHK", "item_count": len(all_items)},
         )
 
-        output_path, row_count = await asyncio.to_thread(generate_rthk_excel, all_items)
+        output_path, row_count = await asyncio.to_thread(
+            generate_rthk_excel, all_items, "Dot Dot News"
+        )
         file_size = os.path.getsize(output_path)
         log_event(
             "logs_excel_generate_done",
@@ -249,6 +251,152 @@ async def on_excel_export_rthk(update: Update, context: ContextTypes.DEFAULT_TYP
             session_id=session_data.get("session_id"),
             update=update,
             extra={"source": "RTHK", "error": str(e)},
+        )
+        buttons = [[InlineKeyboardButton("⬅️ 返回", callback_data=f"logs_excel_export|{session_key}")]]
+        await query.edit_message_text(
+            f"❌ Excel導出失敗：{e}",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    finally:
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+
+
+async def on_excel_export_dotdot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    session_key = query.data.split("|")[1]
+
+    if session_key not in user_sessions:
+        await query.edit_message_text(SESSION_EXPIRED_TEXT)
+        return
+
+    touch_session(
+        context=context,
+        session_key=session_key,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+    )
+    session_data = user_sessions.get(session_key) or {}
+
+    try:
+        log_event(
+            "logs_excel_dotdot_click",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+        )
+    except Exception:
+        pass
+
+    await query.edit_message_text("正在匯出 Dot Dot News Logs（最近24小時，HKT）...\n請稍候。")
+
+    output_path = ""
+    try:
+        log_event(
+            "logs_excel_gmail_fetch_start",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"source": "DotDot News", "hours": 24},
+        )
+
+        emails = await asyncio.to_thread(fetch_dotdot_emails_for_excel, 24, 500)
+        log_event(
+            "logs_excel_gmail_fetch_done",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"source": "DotDot News", "email_count": len(emails)},
+        )
+
+        all_items: List[Dict[str, Any]] = []
+        for one in emails:
+            json_data = one.get("json_data")
+            all_items.extend(parse_rthk_json_data(json_data))
+
+        log_event(
+            "logs_excel_parse_done",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"source": "DotDot News", "item_count": len(all_items)},
+        )
+
+        output_path, row_count = await asyncio.to_thread(generate_rthk_excel, all_items)
+        file_size = os.path.getsize(output_path)
+        log_event(
+            "logs_excel_generate_done",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={
+                "source": "DotDot News",
+                "row_count": row_count,
+                "path": output_path,
+                "size": file_size,
+            },
+        )
+
+        with open(output_path, "rb") as fp:
+            sent_message = await context.bot.send_document(
+                chat_id=query.message.chat.id,
+                document=fp,
+                filename=os.path.basename(output_path),
+                caption=f"Dot Dot News Logs 導出（最近24小時 HKT），共 {row_count} 條。",
+            )
+
+        send_ok = bool(sent_message and getattr(sent_message, "document", None))
+        log_event(
+            "logs_excel_send_done",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"source": "DotDot News", "send_ok": send_ok, "chat_id": query.message.chat.id},
+        )
+        log_event(
+            "logs_excel_send_verify",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"source": "DotDot News", "verified": send_ok},
+        )
+
+        if not send_ok:
+            buttons = [[InlineKeyboardButton("⬅️ 返回", callback_data=f"logs_excel_export|{session_key}")]]
+            await query.edit_message_text(
+                "⚠️ Excel已生成，但發送驗證未通過，請重試。",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        log_event(
+            "logs_excel_end_session",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"source": "DotDot News"},
+        )
+        await end_session(
+            application=context.application,
+            session_key=session_key,
+            reason_text="excel已生成，會話結束。",
+            reason_code="logs_excel_export_done",
+            user_id=query.from_user.id,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+        )
+    except Exception as e:
+        log_event(
+            "logs_excel_export_failed",
+            session_key=session_key,
+            session_id=session_data.get("session_id"),
+            update=update,
+            extra={"source": "DotDot News", "error": str(e)},
         )
         buttons = [[InlineKeyboardButton("⬅️ 返回", callback_data=f"logs_excel_export|{session_key}")]]
         await query.edit_message_text(

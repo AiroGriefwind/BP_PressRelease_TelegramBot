@@ -30,7 +30,7 @@ from features.logs_ui import (
     on_logs_refresh,
     on_menu_logs,
 )
-from features.logs_excel import on_excel_export_rthk
+from features.logs_excel import on_excel_export_dotdot, on_excel_export_rthk
 from features.help_ui import on_help_back_list, on_help_back_main, on_help_detail, on_menu_help
 from features.pr_processing import (
     handle_file,
@@ -112,6 +112,7 @@ def main():
         CallbackQueryHandler(on_excel_export_placeholder, pattern=r"^excel_export_placeholder\|")
     )
     app.add_handler(CallbackQueryHandler(on_excel_export_rthk, pattern=r"^excel_export_rthk\|"))
+    app.add_handler(CallbackQueryHandler(on_excel_export_dotdot, pattern=r"^excel_export_dotdot\|"))
     app.add_handler(CallbackQueryHandler(on_menu_help, pattern=r"^menu_help\|"))
     app.add_handler(CallbackQueryHandler(on_help_detail, pattern=r"^help_detail\|"))
     app.add_handler(CallbackQueryHandler(on_help_back_list, pattern=r"^help_back_list\|"))

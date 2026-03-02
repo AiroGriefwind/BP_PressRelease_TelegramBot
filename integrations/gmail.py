@@ -722,3 +722,100 @@ def fetch_rthk_emails_for_excel(hours: int = 24, max_results: int = 500) -> List
 
     out.sort(key=lambda x: x.get("ts", ""))
     return out
+
+
+def fetch_dotdot_emails_for_excel(hours: int = 24, max_results: int = 500) -> List[Dict[str, Any]]:
+    service = get_gmail_service()
+    subject_keyword = "DotDot News Batch Processed"
+    preferred_label_name = "公關稿ai-logs"
+    q = 'subject:"DotDot News Batch Processed" newer_than:1d'
+
+    def _norm_label_name(name: str) -> str:
+        # 统一：大小写不敏感 + 去空白 + 去连字符，兼容 "AI Logs" / "ai-logs" 等差异
+        return re.sub(r"[\s\-_]+", "", (name or "").strip().lower())
+
+    label_id = None
+    target_norm = _norm_label_name(preferred_label_name)
+    try:
+        labels_resp = service.users().labels().list(userId="me").execute()
+        labels = labels_resp.get("labels", []) or []
+
+        # 1) 优先精确名（忽略大小写）
+        for lb in labels:
+            lb_name = (lb.get("name") or "").strip()
+            if lb_name.lower() == preferred_label_name.lower():
+                label_id = lb.get("id")
+                break
+
+        # 2) 再做规范化模糊匹配（兼容空格/连字符）
+        if not label_id:
+            for lb in labels:
+                lb_name = lb.get("name") or ""
+                if _norm_label_name(lb_name) == target_norm:
+                    label_id = lb.get("id")
+                    break
+        # 3) 最后做"包含式"匹配，兼容名称有前后缀
+        if not label_id:
+            for lb in labels:
+                lb_name = lb.get("name") or ""
+                n = _norm_label_name(lb_name)
+                if target_norm in n or n in target_norm:
+                    label_id = lb.get("id")
+                    break
+    except Exception:
+        label_id = None
+
+    msgs = []
+    page_token = None
+    while True:
+        remaining = max_results - len(msgs)
+        if remaining <= 0:
+            break
+        # 先按 subject 拉候选，再在 get(full) 里按 labelId 严格过滤。
+        # 这样保留 label 条件，同时规避 list 接口对 label 查询的兼容问题。
+        resp = service.users().messages().list(
+            userId="me",
+            q=q,
+            maxResults=min(100, remaining),
+            pageToken=page_token,
+        ).execute()
+        msgs.extend(resp.get("messages", []) or [])
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    cutoff = now_hk() - timedelta(hours=hours)
+    out: List[Dict[str, Any]] = []
+    for msg in msgs:
+        mid = msg.get("id")
+        if not mid:
+            continue
+        detail = service.users().messages().get(userId="me", id=mid, format="full").execute()
+        if label_id:
+            msg_label_ids = detail.get("labelIds", []) or []
+            if label_id not in msg_label_ids:
+                continue
+        payload = detail.get("payload") or {}
+        subject = _safe_header(payload.get("headers") or [], "Subject").strip()
+        if subject_keyword.lower() not in subject.lower():
+            continue
+
+        internal_ms = int(detail.get("internalDate", "0") or "0")
+        ts_dt = datetime.fromtimestamp(internal_ms / 1000, now_hk().tzinfo)
+        if ts_dt < cutoff:
+            continue
+
+        # 提取JSON附件
+        json_data = _extract_json_attachment(service, mid, payload)
+
+        out.append(
+            {
+                "id": mid,
+                "subject": subject,
+                "ts": ts_dt.isoformat(timespec="seconds"),
+                "json_data": json_data,
+            }
+        )
+
+    out.sort(key=lambda x: x.get("ts", ""))
+    return out
