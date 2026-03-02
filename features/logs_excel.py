@@ -78,6 +78,11 @@ def generate_rthk_excel(items: List[Dict[str, Any]], report_name: str = "RTHK Ne
         ws.append(row_data)
         row_idx = ws.max_row
 
+        # 设置 Post ID / Target / Original Time Text 顶端对齐
+        ws.cell(row=row_idx, column=1).alignment = Alignment(vertical="top")  # Post ID
+        ws.cell(row=row_idx, column=2).alignment = Alignment(vertical="top")  # Target
+        ws.cell(row=row_idx, column=6).alignment = Alignment(vertical="top")  # Original Time Text
+
         # 设置 Original Subject 和 WP Title 的对齐（都贴上面，vertical="top"）
         ws.cell(row=row_idx, column=3).alignment = Alignment(wrap_text=True, vertical="top")  # Original Subject
         ws.cell(row=row_idx, column=4).alignment = Alignment(wrap_text=True, vertical="top")  # WP Title
